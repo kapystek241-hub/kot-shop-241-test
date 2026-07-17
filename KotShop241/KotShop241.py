@@ -1,5 +1,6 @@
 import os
 import logging
+from dotenv import load_dotenv
 from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
