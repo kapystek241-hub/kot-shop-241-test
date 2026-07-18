@@ -1,56 +1,73 @@
 import os
-import logging
-from datetime import datetime, timezone
+import hashlib
+import hmac
+import random
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from dotenv import load_dotenv
+import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("kotshop-bot")
+# Если на BotHost нет файла .env — уберите load_dotenv и берите из os.environ
+try:
+    load_dotenv(".env")
+except Exception:
+    pass
 
-# Берём токен напрямую из переменных окружения BotHost
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
+TBANK_TERMINAL_SECRET = os.getenv("TBANK_TERMINAL_SECRET")
+TBANK_BASE_URL = os.getenv("TBANK_BASE_URL", "https://securepay.tinkoff.ru")
 
-if not TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан! Проверь настройки проекта в панели BotHost.")
-
-logger.info("Токен успешно загружен из переменных окружения.")
-
-bot = Bot(token=TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-@dp.message(Command("buy"))
-async def cmd_buy(message: types.Message):
-    user = message.from_user
-    user_id = user.id
-    amount = 600  # фиксированная сумма для теста
+def generate_order_id(chat_id: int) -> str:
+    # Уникальность: chat_id + случайное число
+    return f"{chat_id}_{random.randint(10000, 99999)}"
 
-    order_id = f"ORD-{user_id}-{int(datetime.now(timezone.utc).timestamp())}"
-    logger.info(f"Пользователь {user_id} запросил оплату. order_id={order_id}")
-
-    # Ссылка ведёт на твой VPS
-    vps_url = f"https://kotshop241.ru/start-payment?oid={order_id}&uid={user_id}"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить заказ", url=vps_url)]
-    ])
-
-    await message.answer(
-        f"💰 Заказ #{order_id}\n"
-        f"Сумма: {amount} ₽\n\n"
-        "Нажмите кнопку ниже, чтобы перейти к оплате.",
-        reply_markup=kb
-    )
+def create_token(payload: dict, secret: str) -> str:
+    # Сортируем ключи по алфавиту, склеиваем значения, считаем HMAC-SHA256
+    sorted_keys = sorted(payload.keys())
+    concatenated = "".join(str(payload[k]) for k in sorted_keys if k != "Token")
+    digest = hmac.new(secret.encode("utf-8"), concatenated.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer(
-        "Привет! Я бот KotShop241.\n"
-        "Нажми /buy, чтобы оформить заказ."
-    )
+    amount_kopecks = 10000  # 100 рублей
+    order_id = generate_order_id(message.chat.id)
+
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "Amount": amount_kopecks,
+        "OrderId": order_id,
+        "Description": f"Оплата заказа {order_id} в KotShop241",
+    }
+    token = create_token(payload, TBANK_TERMINAL_SECRET)
+    payload["Token"] = token
+
+    try:
+        resp = requests.post(f"{TBANK_BASE_URL}/v2/Init", json=payload, timeout=10)
+        data = resp.json()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при создании платежа: {e}")
+        return
+
+    if data.get("Success") and "PaymentURL" in data:
+        payment_url = data["PaymentURL"]
+        await message.answer(
+            f"💳 Оплата заказа {order_id}\n"
+            f"Сумма: 100 ₽\n"
+            f"Нажмите на кнопку ниже, чтобы оплатить:",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="Оплатить", url=payment_url)]
+            ])
+        )
+    else:
+        error_msg = data.get("Message", "Неизвестная ошибка при создании платежа")
+        await message.answer(f"❌ Не удалось создать платёж: {error_msg}")
 
 async def main():
-    logger.info("Запуск бота на BotHost...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
