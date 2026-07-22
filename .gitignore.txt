@@ -36,6 +36,10 @@ wheels/
 .env
 .env.local
 .env.*.local
+__pycache__/
+*.pyc
+venv/
+
 
 # Логи и кэш
 *.log
