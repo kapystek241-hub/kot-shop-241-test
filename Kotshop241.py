@@ -7,8 +7,9 @@ from datetime import datetime
 from typing import Optional
 
 import aiohttp
-import certifi  # <-- новый импорт
+import certifi
 import json
+import ssl  # <-- добавляем этот импорт
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, CallbackQuery, Message
@@ -52,12 +53,14 @@ session: Optional[aiohttp.ClientSession] = None
 async def get_session() -> aiohttp.ClientSession:
     global session
     if session is None:
-        # Используем certifi.where() для актуальных корневых сертификатов
-        ssl_context = aiohttp.TCPConnector(ssl=aiohttp.SSLContext())
-        ssl_context._ssl_context.load_verify_locations(certifi.where())
+        # Создаём правильный SSL-контекст через стандартный ssl.SSLContext
+        ssl_context = ssl.create_default_context()
+        ssl_context.load_verify_locations(certifi.where())
+
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
 
         session = aiohttp.ClientSession(
-            connector=ssl_context,
+            connector=connector,
             timeout=aiohttp.ClientTimeout(total=15)
         )
     return session
