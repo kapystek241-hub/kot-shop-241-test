@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Optional
 
 import aiohttp
-import certifi
 import json
 import ssl  # <-- добавляем этот импорт
 from aiogram import Bot, Dispatcher, F, Router
