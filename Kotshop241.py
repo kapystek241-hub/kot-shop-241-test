@@ -53,9 +53,8 @@ session: Optional[aiohttp.ClientSession] = None
 async def get_session() -> aiohttp.ClientSession:
     global session
     if session is None:
-        # Создаём правильный SSL-контекст через стандартный ssl.SSLContext
+        # Используем системный SSL-контекст без подгрузки certifi
         ssl_context = ssl.create_default_context()
-        ssl_context.load_verify_locations(certifi.where())
 
         connector = aiohttp.TCPConnector(ssl=ssl_context)
 
