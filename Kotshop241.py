@@ -9,8 +9,10 @@ from typing import Optional
 import aiohttp
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder, Message
+from aiogram.types import InlineKeyboardButton, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder  # <-- ИСПРАВЛЕНО: отсюда
 from dotenv import load_dotenv
+import json
 
 # -----------------------------
 # Настройка логирования
@@ -37,12 +39,12 @@ if not all([BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_SECRET_KEY]):
 # -----------------------------
 # Константы
 # -----------------------------
-PAYMENT_AMOUNT_RUB = 100  # фиксированная цена товара
+PAYMENT_AMOUNT_RUB = 100
 PAYMENT_CURRENCY = "RUB"
 ORDER_PREFIX = "kotshop_"
 
 # -----------------------------
-# HTTP клиент (переиспользуемый)
+# HTTP клиент
 # -----------------------------
 session: Optional[aiohttp.ClientSession] = None
 
@@ -59,13 +61,9 @@ async def close_session():
         session = None
 
 # -----------------------------
-# API Т-Банка (упрощённо)
+# API Т-Банка
 # -----------------------------
 async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
-    """
-    Инициализация платежа в Т-Банке.
-    Возвращает ответ API или None при ошибке.
-    """
     url = "https://securepay.tinkoff.ru/v2/Init"
     payload = {
         "TerminalKey": TBANK_TERMINAL_KEY,
@@ -74,28 +72,25 @@ async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
         "OrderId": order_id,
         "Description": "Пополнение игровой валюты и сервисов",
         "Data": {
-            "Email": "client@example.com",  # можно брать из данных пользователя при необходимости
-            "Phone": "+79990000000"         # можно брать из данных пользователя при необходимости
+            "Email": "client@example.com",
+            "Phone": "+79990000000"
         }
     }
 
-    # Подпись PayLoad (обязательная для Init)
-    # В документации Т-Банка: Signature = HMAC-SHA256(JSON_без_пробелов, SecretKey)
-    import json
+    # Формирование подписи Token
     json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     signature = hmac.new(
         TBANK_SECRET_KEY.encode("utf-8"),
         json_str.encode("utf-8"),
         hashlib.sha256
     ).hexdigest()
-
     payload["Token"] = signature
 
     try:
         sess = await get_session()
         async with sess.post(url, json=payload) as resp:
             data = await resp.json()
-            logger.info(f"Tinkoff Init response (status={resp.status}, success={data.get('Success')})")
+            logger.info(f"Tinkoff Init response (status={resp.status}): {data}")
             if resp.status == 200 and data.get("Success"):
                 return data
             else:
@@ -107,15 +102,11 @@ async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
 
 
 async def tbank_get_order_status(order_id: str) -> Optional[dict]:
-    """
-    Проверка статуса заказа.
-    """
     url = "https://securepay.tinkoff.ru/v2/GetOrderStatus"
     payload = {
         "TerminalKey": TBANK_TERMINAL_KEY,
         "OrderId": order_id
     }
-    import json
     json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     signature = hmac.new(
         TBANK_SECRET_KEY.encode("utf-8"),
@@ -182,17 +173,6 @@ async def cb_buy_item(callback: CallbackQuery):
     logger.info(f"Payment link sent for order_id={order_id}")
 
 
-# Простая периодическая проверка статусов (можно сделать умнее, но это базовый вариант)
-async def check_pending_payments(bot: Bot):
-    """
-    В реальном проекте здесь будет очередь заказов и более умная логика.
-    Сейчас это заглушка, чтобы показать принцип проверки статуса.
-    """
-    # Для примера: можно хранить pending_orders в Redis/SQLite.
-    # Здесь мы ничего не делаем, но место под логику есть.
-    pass
-
-
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
@@ -200,7 +180,6 @@ async def main():
 
     logger.info("Starting bot...")
     await dp.start_polling(bot)
-    # При остановке корректно закроем HTTP-сессию
     await close_session()
 
 
