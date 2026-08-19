@@ -1,204 +1,212 @@
 import asyncio
 import os
-from aiogram import Bot, Dispatcher, F
+import logging
+import hashlib
+import hmac
+from datetime import datetime
+from typing import Optional
+
+import aiohttp
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder, Message
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения
+# -----------------------------
+# Настройка логирования
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("KotShop241")
+
 load_dotenv()
 
+# -----------------------------
+# Переменные окружения
+# -----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("Не задан BOT_TOKEN в .env")
+TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
+TBANK_SECRET_KEY = os.getenv("TBANK_SECRET_KEY")
 
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/KotShop241")
-SUPPORT_TG = os.getenv("SUPPORT_TG", "t.me/KotShop2415")
-SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "kotshop241@gmail.com")
+if not all([BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_SECRET_KEY]):
+    logger.error("Не заданы все необходимые переменные окружения!")
+    raise ValueError("Проверьте .env: BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_SECRET_KEY")
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# -----------------------------
+# Константы
+# -----------------------------
+PAYMENT_AMOUNT_RUB = 100  # фиксированная цена товара
+PAYMENT_CURRENCY = "RUB"
+ORDER_PREFIX = "kotshop_"
 
-# --- ТЕКСТЫ ---
+# -----------------------------
+# HTTP клиент (переиспользуемый)
+# -----------------------------
+session: Optional[aiohttp.ClientSession] = None
 
-TEXT_MAIN_MENU = (
-    "Здравствуйте!\n\n"
-    "Сейчас бот принимает заявки на пополнение баланса, но автоматическая выдача товара временно недоступна — "
-    "мы активно работаем над устранением этой проблемы.\n\n"
-    "На данный момент время пополнения в среднем занимает 15 минут.\n"
-    "Магазин работает с 7:00 до 23:00 по МСК, просим прощения за неудобства.\n\n"
-    f"Актуальную информацию о ходе работ публикуем в нашем Telegram‑канале: {CHANNEL_LINK}\n\n"
-    "Благодарим за ваше понимание!"
-)
+async def get_session() -> aiohttp.ClientSession:
+    global session
+    if session is None:
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    return session
 
-TEXT_OFFER_PART1 = (
-    "Все документы, написанные ниже, являются настоящими и могут быть проверены на официальных сайтах РФ.\n\n"
-    "ИНН Предпринимателя: 661912653571\n"
-    "Оферта заключена с банком Т‑Банк, вся оплата проходит через банк‑посредник Т‑Банк.\n"
-    "Комиссии не взимаются при возврате средств на тот же счёт, с которого была произведена оплата, "
-    "за исключением комиссии, которую взимает банк в случае перевода (она не учитывается в оплате).\n\n"
-)
+async def close_session():
+    global session
+    if session:
+        await session.close()
+        session = None
 
-TEXT_OFFER_PART2 = (
-    "Все переводы, оплата и прочие списания, связанные с магазином, являются официальными, "
-    "с предоставлением чека в случае, если клиент потребует его предоставить.\n\n"
-    "При неверных параметрах, отмене получения товара в случае, когда товар доставлен, "
-    "но покупатель требует возврата, магазин может отказаться предоставлять возврат, такое может произойти:\n"
-    "- Если товар был доставлен на итоговый аккаунт, предоставленный клиентом.\n"
-    "- Если товар частично доставлен или был отправлен с задержкой.\n"
-    "- В случае странных транзакций, обходов системы безопасности, взлома или прочих незаконных действий. "
-    "Также в этом случае возможна отправка данных в госорганы для обеспечения безопасности магазина "
-    "и невиновных клиентов.\n\n"
-    "Оскорбления, угрозы жизни прямого характера будут также направлены в госорганы. "
-    "Попытки обойти закон РФ, обмануть систему Telegram‑бота для получения выгоды будут рассматриваться как правонарушения.\n\n"
-    "В случае неверно указанных данных для предоставления товара, при их отправке на указанные данные "
-    "невозможно вернуть средства.\n\n"
-    "Вся личная информация не передаётся третьим лицам и не является общедоступной.\n\n"
-    f"Официальный аккаунт поддержки магазина KotShop241: {SUPPORT_TG}\n"
-    f"Почта: {SUPPORT_EMAIL}"
-)
-
-TEXT_CATEGORIES = "На данный момент доступны следующие категории товаров, но список постоянно расширяется:"
-TEXT_SUPPORT_WAYS = "Выберите удобный способ связи с нашей поддержкой:"
-TEXT_TOURNAMENT = "На данный момент первый турнир от магазина KotShop241 по игре PUBG Mobile откладывается на неопределённый срок."
-TEXT_RAFFLE = f"На данный момент не проводится коллаборации. Новости по коллаборациям можно будет найти у нас в Telegram‑канале:\n{CHANNEL_LINK}"
-TEXT_PUBG_CHOICE = "Выберите интересующий раздел:"
-TEXT_STEAM_CHOICE = "Выберите интересующий раздел:"
-TEXT_EMAIL_CONTACT = f"Отправьте форму обращения на почту по адресу: {SUPPORT_EMAIL}"
-
-# --- КЛАВИАТУРЫ ---
-
-def kb_main():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Меню", callback_data="menu_main")
-    builder.button(text="Оферта", callback_data="offer_part1")
-    return builder.as_markup()
-
-def kb_menu_main():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Раздел с товаром", callback_data="cat_main")
-    builder.button(text="Поддержка", callback_data="support_main")
-    builder.button(text="Турнир", callback_data="tournament")
-    builder.button(text="Розыгрыш", callback_data="raffle")
-    builder.button(text="Назад", callback_data="back_to_start")
-    return builder.as_markup()
-
-def kb_categories():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="PUBG Mobile", callback_data="cat_pubg")
-    builder.button(text="Steam РФ", callback_data="cat_steam")
-    builder.button(text="Назад", callback_data="back_to_menu")
-    return builder.as_markup()
-
-def kb_support_main():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Поддержка (Telegram)", url=SUPPORT_TG)
-    builder.button(text="Почта", callback_data="support_email")
-    builder.button(text="Назад", callback_data="back_to_menu")
-    return builder.as_markup()
-
-def kb_back_only():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Назад", callback_data="back_to_cat")
-    return builder.as_markup()
-
-def kb_offer_navigation(part: int):
-    builder = InlineKeyboardBuilder()
-    if part == 1:
-        builder.button(text="Далее", callback_data="offer_part2")
-    else:
-        builder.button(text="Назад", callback_data="offer_part1")
-    builder.button(text="В главное меню", callback_data="back_to_start")
-    return builder.as_markup()
-
-def kb_email_contact():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Назад", callback_data="back_to_support")
-    return builder.as_markup()
-
-# --- ХЕНДЛЕРЫ ---
-
-async def safe_edit_message(callback: CallbackQuery, text: str, reply_markup=None):
+# -----------------------------
+# API Т-Банка (упрощённо)
+# -----------------------------
+async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
     """
-    Пытается отредактировать сообщение. Если не получается (например, сообщение слишком старое),
-    отправляет новое. Это решает проблему, когда Telegram запрещает редактирование.
+    Инициализация платежа в Т-Банке.
+    Возвращает ответ API или None при ошибке.
     """
+    url = "https://securepay.tinkoff.ru/v2/Init"
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "Amount": amount,
+        "Currency": PAYMENT_CURRENCY,
+        "OrderId": order_id,
+        "Description": "Пополнение игровой валюты и сервисов",
+        "Data": {
+            "Email": "client@example.com",  # можно брать из данных пользователя при необходимости
+            "Phone": "+79990000000"         # можно брать из данных пользователя при необходимости
+        }
+    }
+
+    # Подпись PayLoad (обязательная для Init)
+    # В документации Т-Банка: Signature = HMAC-SHA256(JSON_без_пробелов, SecretKey)
+    import json
+    json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    signature = hmac.new(
+        TBANK_SECRET_KEY.encode("utf-8"),
+        json_str.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    payload["Token"] = signature
+
     try:
-        await callback.message.edit_text(text=text, reply_markup=reply_markup)
-    except Exception:
-        # Если редактирование невозможно — отправляем новое сообщение
-        await callback.message.answer(text=text, reply_markup=reply_markup)
+        sess = await get_session()
+        async with sess.post(url, json=payload) as resp:
+            data = await resp.json()
+            logger.info(f"Tinkoff Init response (status={resp.status}, success={data.get('Success')})")
+            if resp.status == 200 and data.get("Success"):
+                return data
+            else:
+                logger.error(f"Tinkoff Init failed: {data}")
+                return None
+    except Exception as e:
+        logger.exception(f"Error calling Tinkoff Init: {e}")
+        return None
 
-@dp.message(Command("start"))
-async def cmd_start(message):
-    await message.answer(TEXT_MAIN_MENU, reply_markup=kb_main())
 
-@dp.message(F.text == "Меню")
-async def text_menu(message):
-    await message.answer(TEXT_MAIN_MENU, reply_markup=kb_menu_main())
+async def tbank_get_order_status(order_id: str) -> Optional[dict]:
+    """
+    Проверка статуса заказа.
+    """
+    url = "https://securepay.tinkoff.ru/v2/GetOrderStatus"
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "OrderId": order_id
+    }
+    import json
+    json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    signature = hmac.new(
+        TBANK_SECRET_KEY.encode("utf-8"),
+        json_str.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    payload["Token"] = signature
 
-@dp.callback_query(F.data == "menu_main")
-async def cb_menu_main(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_MAIN_MENU, kb_menu_main())
+    try:
+        sess = await get_session()
+        async with sess.post(url, json=payload) as resp:
+            data = await resp.json()
+            logger.info(f"Tinkoff GetOrderStatus response (status={resp.status}): {data}")
+            if resp.status == 200:
+                return data
+            else:
+                logger.error(f"Tinkoff GetOrderStatus failed: {data}")
+                return None
+    except Exception as e:
+        logger.exception(f"Error calling Tinkoff GetOrderStatus: {e}")
+        return None
 
-@dp.callback_query(F.data == "cat_main")
-async def cb_cat_main(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_CATEGORIES, kb_categories())
 
-@dp.callback_query(F.data == "cat_pubg")
-async def cb_cat_pubg(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_PUBG_CHOICE, kb_back_only())
+# -----------------------------
+# Логика бота
+# -----------------------------
+router = Router()
 
-@dp.callback_query(F.data == "cat_steam")
-async def cb_cat_steam(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_STEAM_CHOICE, kb_back_only())
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Купить товар (100 ₽)", callback_data="buy_item")
+    await message.answer(
+        "Привет! Это бот KotShop241.\n"
+        "Здесь можно безопасно и дёшево купить игровую валюту и пополнить сервисы.\n"
+        "Выберите действие:",
+        reply_markup=builder.as_markup()
+    )
 
-@dp.callback_query(F.data == "support_main")
-async def cb_support_main(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_SUPPORT_WAYS, kb_support_main())
 
-@dp.callback_query(F.data == "support_email")
-async def cb_support_email(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_EMAIL_CONTACT, kb_email_contact())
+@router.callback_query(F.data == "buy_item")
+async def cb_buy_item(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    order_id = f"{ORDER_PREFIX}{user_id}_{int(datetime.now().timestamp())}"
 
-@dp.callback_query(F.data == "tournament")
-async def cb_tournament(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_TOURNAMENT, kb_back_only())
+    logger.info(f"Creating payment for user {user_id}, order_id={order_id}")
 
-@dp.callback_query(F.data == "raffle")
-async def cb_raffle(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_RAFFLE, kb_back_only())
+    result = await tbank_init_payment(order_id=order_id, amount=PAYMENT_AMOUNT_RUB)
 
-# Навигация «Назад»
-@dp.callback_query(F.data == "back_to_start")
-async def cb_back_to_start(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_MAIN_MENU, kb_main())
+    if not result or not result.get("Success") or "PaymentURL" not in result:
+        await callback.answer("Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
+        return
 
-@dp.callback_query(F.data == "back_to_menu")
-async def cb_back_to_menu(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_MAIN_MENU, kb_menu_main())
+    payment_url = result["PaymentURL"]
 
-@dp.callback_query(F.data == "back_to_cat")
-async def cb_back_to_cat(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_CATEGORIES, kb_categories())
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Перейти к оплате", url=payment_url)
+    await callback.message.edit_text(
+        f"Заказ #{order_id}\n"
+        f"Сумма: {PAYMENT_AMOUNT_RUB} ₽\n\n"
+        "Перейдите по ссылке для оплаты:",
+        reply_markup=builder.as_markup()
+    )
+    logger.info(f"Payment link sent for order_id={order_id}")
 
-@dp.callback_query(F.data == "back_to_support")
-async def cb_back_to_support(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_SUPPORT_WAYS, kb_support_main())
 
-# Оферта (2 части)
-@dp.callback_query(F.data == "offer_part1")
-async def cb_offer_part1(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_OFFER_PART1, kb_offer_navigation(1))
+# Простая периодическая проверка статусов (можно сделать умнее, но это базовый вариант)
+async def check_pending_payments(bot: Bot):
+    """
+    В реальном проекте здесь будет очередь заказов и более умная логика.
+    Сейчас это заглушка, чтобы показать принцип проверки статуса.
+    """
+    # Для примера: можно хранить pending_orders в Redis/SQLite.
+    # Здесь мы ничего не делаем, но место под логику есть.
+    pass
 
-@dp.callback_query(F.data == "offer_part2")
-async def cb_offer_part2(callback: CallbackQuery):
-    await safe_edit_message(callback, TEXT_OFFER_PART2, kb_offer_navigation(2))
 
-# Запуск
 async def main():
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    logger.info("Starting bot...")
     await dp.start_polling(bot)
+    # При остановке корректно закроем HTTP-сессию
+    await close_session()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+        asyncio.run(close_session())
