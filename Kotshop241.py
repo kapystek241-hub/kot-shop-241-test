@@ -7,12 +7,12 @@ from datetime import datetime
 from typing import Optional
 
 import aiohttp
+import json
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder  # <-- ИСПРАВЛЕНО: отсюда
+from aiogram.types import InlineKeyboardButton, CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
-import json
 
 # -----------------------------
 # Настройка логирования
@@ -44,7 +44,7 @@ PAYMENT_CURRENCY = "RUB"
 ORDER_PREFIX = "kotshop_"
 
 # -----------------------------
-# HTTP клиент
+# HTTP клиент (переиспользуемый)
 # -----------------------------
 session: Optional[aiohttp.ClientSession] = None
 
@@ -61,7 +61,7 @@ async def close_session():
         session = None
 
 # -----------------------------
-# API Т-Банка
+# API Т-Банка: Init
 # -----------------------------
 async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
     url = "https://securepay.tinkoff.ru/v2/Init"
@@ -77,7 +77,7 @@ async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
         }
     }
 
-    # Формирование подписи Token
+    # Формирование подписи Token (обязательно по спецификации Т-Банка)
     json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     signature = hmac.new(
         TBANK_SECRET_KEY.encode("utf-8"),
@@ -100,7 +100,9 @@ async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
         logger.exception(f"Error calling Tinkoff Init: {e}")
         return None
 
-
+# -----------------------------
+# API Т-Банка: GetOrderStatus
+# -----------------------------
 async def tbank_get_order_status(order_id: str) -> Optional[dict]:
     url = "https://securepay.tinkoff.ru/v2/GetOrderStatus"
     payload = {
@@ -129,7 +131,6 @@ async def tbank_get_order_status(order_id: str) -> Optional[dict]:
         logger.exception(f"Error calling Tinkoff GetOrderStatus: {e}")
         return None
 
-
 # -----------------------------
 # Логика бота
 # -----------------------------
@@ -145,7 +146,6 @@ async def cmd_start(message: Message):
         "Выберите действие:",
         reply_markup=builder.as_markup()
     )
-
 
 @router.callback_query(F.data == "buy_item")
 async def cb_buy_item(callback: CallbackQuery):
@@ -172,7 +172,6 @@ async def cb_buy_item(callback: CallbackQuery):
     )
     logger.info(f"Payment link sent for order_id={order_id}")
 
-
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
@@ -181,7 +180,6 @@ async def main():
     logger.info("Starting bot...")
     await dp.start_polling(bot)
     await close_session()
-
 
 if __name__ == "__main__":
     try:
