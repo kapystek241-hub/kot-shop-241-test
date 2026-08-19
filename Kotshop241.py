@@ -4,14 +4,16 @@ import aiohttp
 import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder  # <-- исправлено
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-VPS_IP = "157.22.252.246"  # проверь, что это актуальный IP твоего VPS
+# Проверь, что это актуальный IP твоего VPS, где крутится FastAPI на порту 8000
+VPS_IP = "157.22.252.246"
 API_BASE_URL = f"http://{VPS_IP}:8000"
 DB_PATH = "orders.db"
 
@@ -53,22 +55,6 @@ def save_order(user_id: int, order_id: str, payment_url: str, amount: float):
         logger.error(f"Failed to save order: {e}")
     finally:
         conn.close()
-
-def get_order_by_order_id(order_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def get_orders_by_user(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
 
 def get_pay_keyboard():
     builder = InlineKeyboardBuilder()
@@ -124,7 +110,6 @@ async def cb_buy_100(callback: types.CallbackQuery):
             await callback.answer(f"Ошибка: {message_text}", show_alert=True)
             return
 
-        # Сохраняем заказ в БД
         save_order(user_id, order_id, payment_url, amount)
 
         logger.info(f"Payment created: order_id={order_id}, url={payment_url}")
