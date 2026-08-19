@@ -7,8 +7,10 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder  # <-- исправлено
 from dotenv import load_dotenv
+import sqlite3
 import os
 
+DB_PATH = "orders.db"
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -129,7 +131,33 @@ async def cb_buy_100(callback: types.CallbackQuery):
     except Exception as e:
         logger.exception(f"Unexpected error during payment init: {e}")
         await callback.answer("Произошла непредвиденная ошибка. Попробуйте позже.", show_alert=True)
+def get_orders_by_user(user_id: int):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, user_id, order_id, amount, status, created_at FROM orders WHERE user_id = ?",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Error reading orders: {e}")
+        return []
 
+@dp.message(Command("myorders"))
+async def cmd_myorders(message: types.Message):
+    rows = get_orders_by_user(message.from_user.id)
+    if not rows:
+        await message.answer("У вас пока нет заказов.")
+        return
+    text = "Ваши заказы:\n"
+    for r in rows:
+        # r = (id, user_id, order_id, amount, status, created_at)
+        text += f"- №{r[0]}: {r[2]} | {r[3]} ₽ | статус: {r[4]} | {r[5]}\n"
+    await message.answer(text)
+    
 async def main():
     init_db()
     logger.info("Starting bot...")
