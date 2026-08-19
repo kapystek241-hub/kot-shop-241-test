@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 import aiohttp
+import certifi  # <-- новый импорт
 import json
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -44,14 +45,21 @@ PAYMENT_CURRENCY = "RUB"
 ORDER_PREFIX = "kotshop_"
 
 # -----------------------------
-# HTTP клиент (переиспользуемый)
+# HTTP клиент с правильными сертификатами
 # -----------------------------
 session: Optional[aiohttp.ClientSession] = None
 
 async def get_session() -> aiohttp.ClientSession:
     global session
     if session is None:
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        # Используем certifi.where() для актуальных корневых сертификатов
+        ssl_context = aiohttp.TCPConnector(ssl=aiohttp.SSLContext())
+        ssl_context._ssl_context.load_verify_locations(certifi.where())
+
+        session = aiohttp.ClientSession(
+            connector=ssl_context,
+            timeout=aiohttp.ClientTimeout(total=15)
+        )
     return session
 
 async def close_session():
@@ -77,7 +85,7 @@ async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
         }
     }
 
-    # Формирование подписи Token (обязательно по спецификации Т-Банка)
+    # Формирование подписи Token
     json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     signature = hmac.new(
         TBANK_SECRET_KEY.encode("utf-8"),
