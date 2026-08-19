@@ -11,7 +11,7 @@ import os
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-VPS_IP = "80.78.244.180"  # проверь, что это актуальный IP твоего VPS
+VPS_IP = "157.22.252.246"  # проверь, что это актуальный IP твоего VPS
 API_BASE_URL = f"http://{VPS_IP}:8000"
 DB_PATH = "orders.db"
 
