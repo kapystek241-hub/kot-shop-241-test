@@ -1,198 +1,154 @@
 import asyncio
-import os
 import logging
-import hashlib
-import hmac
-from datetime import datetime
-from typing import Optional
-
 import aiohttp
-import json
-import ssl  # <-- добавляем этот импорт
-from aiogram import Bot, Dispatcher, F, Router
+import sqlite3
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, CallbackQuery, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder
 from dotenv import load_dotenv
-
-# -----------------------------
-# Настройка логирования
-# -----------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("KotShop241")
+import os
 
 load_dotenv()
 
-# -----------------------------
-# Переменные окружения
-# -----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
-TBANK_SECRET_KEY = os.getenv("TBANK_SECRET_KEY")
+VPS_IP = "80.78.244.180"  # проверь, что это актуальный IP твоего VPS
+API_BASE_URL = f"http://{VPS_IP}:8000"
+DB_PATH = "orders.db"
 
-if not all([BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_SECRET_KEY]):
-    logger.error("Не заданы все необходимые переменные окружения!")
-    raise ValueError("Проверьте .env: BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_SECRET_KEY")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("kotshop_bot")
 
-# -----------------------------
-# Константы
-# -----------------------------
-PAYMENT_AMOUNT_RUB = 100
-PAYMENT_CURRENCY = "RUB"
-ORDER_PREFIX = "kotshop_"
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# -----------------------------
-# HTTP клиент с правильными сертификатами
-# -----------------------------
-session: Optional[aiohttp.ClientSession] = None
-
-async def get_session() -> aiohttp.ClientSession:
-    global session
-    if session is None:
-        # Используем системный SSL-контекст без подгрузки certifi
-        ssl_context = ssl.create_default_context()
-
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-
-        session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=15)
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            order_id TEXT NOT NULL,
+            payment_url TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'WAITING'
         )
-    return session
+    """)
+    conn.commit()
+    conn.close()
+    logger.info("Database initialized.")
 
-async def close_session():
-    global session
-    if session:
-        await session.close()
-        session = None
-
-# -----------------------------
-# API Т-Банка: Init
-# -----------------------------
-async def tbank_init_payment(order_id: str, amount: int) -> Optional[dict]:
-    url = "https://securepay.tinkoff.ru/v2/Init"
-    payload = {
-        "TerminalKey": TBANK_TERMINAL_KEY,
-        "Amount": amount,
-        "Currency": PAYMENT_CURRENCY,
-        "OrderId": order_id,
-        "Description": "Пополнение игровой валюты и сервисов",
-        "Data": {
-            "Email": "client@example.com",
-            "Phone": "+79990000000"
-        }
-    }
-
-    # Формирование подписи Token
-    json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    signature = hmac.new(
-        TBANK_SECRET_KEY.encode("utf-8"),
-        json_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    payload["Token"] = signature
-
+def save_order(user_id: int, order_id: str, payment_url: str, amount: float):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
     try:
-        sess = await get_session()
-        async with sess.post(url, json=payload) as resp:
-            data = await resp.json()
-            logger.info(f"Tinkoff Init response (status={resp.status}): {data}")
-            if resp.status == 200 and data.get("Success"):
-                return data
-            else:
-                logger.error(f"Tinkoff Init failed: {data}")
-                return None
+        cur.execute(
+            "INSERT INTO orders (user_id, order_id, payment_url, amount) VALUES (?, ?, ?, ?)",
+            (user_id, order_id, payment_url, amount)
+        )
+        conn.commit()
+        logger.info(f"Order saved: user_id={user_id}, order_id={order_id}")
     except Exception as e:
-        logger.exception(f"Error calling Tinkoff Init: {e}")
-        return None
+        logger.error(f"Failed to save order: {e}")
+    finally:
+        conn.close()
 
-# -----------------------------
-# API Т-Банка: GetOrderStatus
-# -----------------------------
-async def tbank_get_order_status(order_id: str) -> Optional[dict]:
-    url = "https://securepay.tinkoff.ru/v2/GetOrderStatus"
-    payload = {
-        "TerminalKey": TBANK_TERMINAL_KEY,
-        "OrderId": order_id
-    }
-    json_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    signature = hmac.new(
-        TBANK_SECRET_KEY.encode("utf-8"),
-        json_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-    payload["Token"] = signature
+def get_order_by_order_id(order_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-    try:
-        sess = await get_session()
-        async with sess.post(url, json=payload) as resp:
-            data = await resp.json()
-            logger.info(f"Tinkoff GetOrderStatus response (status={resp.status}): {data}")
-            if resp.status == 200:
-                return data
-            else:
-                logger.error(f"Tinkoff GetOrderStatus failed: {data}")
-                return None
-    except Exception as e:
-        logger.exception(f"Error calling Tinkoff GetOrderStatus: {e}")
-        return None
+def get_orders_by_user(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
-# -----------------------------
-# Логика бота
-# -----------------------------
-router = Router()
-
-@router.message(Command("start"))
-async def cmd_start(message: Message):
+def get_pay_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Купить товар (100 ₽)", callback_data="buy_item")
-    await message.answer(
-        "Привет! Это бот KotShop241.\n"
-        "Здесь можно безопасно и дёшево купить игровую валюту и пополнить сервисы.\n"
-        "Выберите действие:",
-        reply_markup=builder.as_markup()
-    )
+    builder.button(text="💳 Купить товар (100 ₽)", callback_data="buy_100")
+    return builder.as_markup()
 
-@router.callback_query(F.data == "buy_item")
-async def cb_buy_item(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    order_id = f"{ORDER_PREFIX}{user_id}_{int(datetime.now().timestamp())}"
-
-    logger.info(f"Creating payment for user {user_id}, order_id={order_id}")
-
-    result = await tbank_init_payment(order_id=order_id, amount=PAYMENT_AMOUNT_RUB)
-
-    if not result or not result.get("Success") or "PaymentURL" not in result:
-        await callback.answer("Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
-        return
-
-    payment_url = result["PaymentURL"]
-
+def get_payment_link_keyboard(payment_url: str):
     builder = InlineKeyboardBuilder()
     builder.button(text="Перейти к оплате", url=payment_url)
-    await callback.message.edit_text(
-        f"Заказ #{order_id}\n"
-        f"Сумма: {PAYMENT_AMOUNT_RUB} ₽\n\n"
-        "Перейдите по ссылке для оплаты:",
-        reply_markup=builder.as_markup()
+    return builder.as_markup()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "Добро пожаловать в KotShop241!\nВыберите товар для покупки:",
+        reply_markup=get_pay_keyboard()
     )
-    logger.info(f"Payment link sent for order_id={order_id}")
+
+@dp.callback_query(F.data == "buy_100")
+async def cb_buy_100(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    amount = 100
+
+    logger.info(f"User {user_id} clicked 'buy_100', initiating payment...")
+
+    payload = {
+        "user_id": user_id,
+        "amount": amount
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{API_BASE_URL}/pay/init",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(f"API returned status {resp.status}")
+                    await callback.answer("Ошибка сервера. Попробуйте позже.", show_alert=True)
+                    return
+
+                data = await resp.json()
+
+        success = data.get("success")
+        message_text = data.get("message", "")
+        order_data = data.get("data", {})
+        payment_url = order_data.get("PaymentURL")
+        order_id = order_data.get("OrderId")
+
+        if not success:
+            logger.warning(f"Payment init failed: {message_text}")
+            await callback.answer(f"Ошибка: {message_text}", show_alert=True)
+            return
+
+        # Сохраняем заказ в БД
+        save_order(user_id, order_id, payment_url, amount)
+
+        logger.info(f"Payment created: order_id={order_id}, url={payment_url}")
+
+        await callback.message.edit_text(
+            f"✅ Заказ создан!\n\n"
+            f"Сумма: {amount} ₽\n"
+            f"OrderId: {order_id}\n\n"
+            f"{message_text}",
+            reply_markup=get_payment_link_keyboard(payment_url)
+        )
+        await callback.answer()
+
+    except asyncio.TimeoutError:
+        logger.error("Request to FastAPI timed out")
+        await callback.answer("Сервер оплаты не ответил вовремя. Попробуйте позже.", show_alert=True)
+    except Exception as e:
+        logger.exception(f"Unexpected error during payment init: {e}")
+        await callback.answer("Произошла непредвиденная ошибка. Попробуйте позже.", show_alert=True)
 
 async def main():
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-    dp.include_router(router)
-
+    init_db()
     logger.info("Starting bot...")
     await dp.start_polling(bot)
-    await close_session()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-        asyncio.run(close_session())
+    asyncio.run(main())
