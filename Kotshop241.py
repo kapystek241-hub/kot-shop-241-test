@@ -1,167 +1,501 @@
 import asyncio
-import logging
-import aiohttp
-import sqlite3
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder  # <-- исправлено
-from dotenv import load_dotenv
-import sqlite3
 import os
+import hashlib
+import hmac
+from datetime import datetime
 
-DB_PATH = "orders.db"
+import aiohttp
+import aiosqlite
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from dotenv import load_dotenv
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Проверь, что это актуальный IP твоего VPS, где крутится FastAPI на порту 8000
-VPS_IP = "157.22.252.246"
-API_BASE_URL = f"http://{VPS_IP}:8000"
-DB_PATH = "orders.db"
+TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
+TBANK_PASSWORD = os.getenv("TBANK_PASSWORD")
+DB_PATH = os.getenv("DB_PATH", "kotshop.db")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("kotshop_bot")
+if not all([BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_PASSWORD]):
+    raise ValueError("Не заданы переменные окружения: BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_PASSWORD")
+
+API_URL = "https://securepay.tinkoff.ru/v2"  # продакшн
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            order_id TEXT NOT NULL,
-            payment_url TEXT NOT NULL,
-            amount REAL NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'WAITING'
+
+# --- FSM States ---
+class OrderFlow(StatesGroup):
+    waiting_for_id = State()
+
+
+# --- База данных ---
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                payment_id TEXT PRIMARY KEY,
+                order_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount_kopecks INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_game_ids (
+                user_id INTEGER PRIMARY KEY,
+                game_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
+
+async def save_order(payment_id: str, order_id: str, user_id: int, amount_kopecks: int):
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO orders (payment_id, order_id, user_id, amount_kopecks, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (payment_id, order_id, user_id, amount_kopecks, "new", now, now)
+            )
+            await db.commit()
+        except aiosqlite.IntegrityError:
+            pass
+
+
+async def get_pending_orders():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM orders WHERE status IN ('new', 'waiting') ORDER BY created_at ASC"
         )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("Database initialized.")
+        return await cur.fetchall()
 
-def save_order(user_id: int, order_id: str, payment_url: str, amount: float):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO orders (user_id, order_id, payment_url, amount) VALUES (?, ?, ?, ?)",
-            (user_id, order_id, payment_url, amount)
+
+async def update_order_status(payment_id: str, status: str):
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET status = ?, updated_at = ? WHERE payment_id = ?",
+            (status, now, payment_id)
         )
-        conn.commit()
-        logger.info(f"Order saved: user_id={user_id}, order_id={order_id}")
-    except Exception as e:
-        logger.error(f"Failed to save order: {e}")
-    finally:
-        conn.close()
+        await db.commit()
 
-def get_pay_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💳 Купить товар (100 ₽)", callback_data="buy_100")
-    return builder.as_markup()
 
-def get_payment_link_keyboard(payment_url: str):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Перейти к оплате", url=payment_url)
-    return builder.as_markup()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Добро пожаловать в KotShop241!\nВыберите товар для покупки:",
-        reply_markup=get_pay_keyboard()
-    )
-
-@dp.callback_query(F.data == "buy_100")
-async def cb_buy_100(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    amount = 100
-
-    logger.info(f"User {user_id} clicked 'buy_100', initiating payment...")
-
-    payload = {
-        "user_id": user_id,
-        "amount": amount
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{API_BASE_URL}/pay/init",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status != 200:
-                    logger.error(f"API returned status {resp.status}")
-                    await callback.answer("Ошибка сервера. Попробуйте позже.", show_alert=True)
-                    return
-
-                data = await resp.json()
-
-        success = data.get("success")
-        message_text = data.get("message", "")
-        order_data = data.get("data", {})
-        payment_url = order_data.get("PaymentURL")
-        order_id = order_data.get("OrderId")
-
-        if not success:
-            logger.warning(f"Payment init failed: {message_text}")
-            await callback.answer(f"Ошибка: {message_text}", show_alert=True)
-            return
-
-        save_order(user_id, order_id, payment_url, amount)
-
-        logger.info(f"Payment created: order_id={order_id}, url={payment_url}")
-
-        await callback.message.edit_text(
-            f"✅ Заказ создан!\n\n"
-            f"Сумма: {amount} ₽\n"
-            f"OrderId: {order_id}\n\n"
-            f"{message_text}",
-            reply_markup=get_payment_link_keyboard(payment_url)
+async def save_game_id(user_id: int, game_id: str):
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO user_game_ids (user_id, game_id, updated_at) VALUES (?, ?, ?)",
+            (user_id, game_id, now)
         )
-        await callback.answer()
+        await db.commit()
 
-    except asyncio.TimeoutError:
-        logger.error("Request to FastAPI timed out")
-        await callback.answer("Сервер оплаты не ответил вовремя. Попробуйте позже.", show_alert=True)
-    except Exception as e:
-        logger.exception(f"Unexpected error during payment init: {e}")
-        await callback.answer("Произошла непредвиденная ошибка. Попробуйте позже.", show_alert=True)
-def get_orders_by_user(user_id: int):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id, user_id, order_id, amount, status, created_at FROM orders WHERE user_id = ?",
+
+async def get_game_id(user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT game_id FROM user_game_ids WHERE user_id = ?",
             (user_id,)
         )
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"Error reading orders: {e}")
-        return []
+        row = await cur.fetchone()
+        return row[0] if row else None
 
-@dp.message(Command("myorders"))
-async def cmd_myorders(message: types.Message):
-    rows = get_orders_by_user(message.from_user.id)
-    if not rows:
-        await message.answer("У вас пока нет заказов.")
+
+# --- Подпись для Т‑Банка ---
+def sign_payload(payload: dict, secret: str) -> str:
+    keys = sorted(k for k in payload.keys() if payload[k] is not None)
+    pairs = [f"{k}={payload[k]}" for k in keys]
+    base_string = "&".join(pairs)
+    return hmac.new(
+        secret.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+
+async def create_payment(order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "Amount": amount_kopecks,
+        "OrderId": order_id,
+        "Description": description or f"Покупка игровой валюты: {order_id}",
+    }
+    token = sign_payload(payload, TBANK_PASSWORD)
+    payload["Token"] = token
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{API_URL}/Init", json=payload) as resp:
+            try:
+                data = await resp.json()
+            except Exception:
+                print("Ошибка парсинга JSON от Т‑Банка")
+                return None
+
+            if data.get("Success") is True and "PaymentId" in data and "PaymentURL" in data:
+                return {
+                    "payment_id": data["PaymentId"],
+                    "payment_url": data["PaymentURL"],
+                }
+            else:
+                print("Init error:", data)
+                return None
+
+
+async def check_payment_state(payment_id: str) -> str | None:
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "PaymentId": payment_id,
+    }
+    token = sign_payload(payload, TBANK_PASSWORD)
+    payload["Token"] = token
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{API_URL}/GetState", json=payload) as resp:
+            try:
+                data = await resp.json()
+            except Exception:
+                print("Ошибка парсинга JSON при GetState")
+                return None
+
+            if not data.get("Success"):
+                print("GetState error:", data)
+                return None
+
+            status = data.get("Status")
+            if status == "WAITING":
+                return "WAITING"
+            elif status == "CONFIRMED":
+                return "SUCCESS"
+            elif status in ("REJECTED", "CANCELED"):
+                return "REJECTED"
+            return status
+
+
+# --- Логика выдачи товара (заглушка) ---
+async def deliver_item(order_id: str, user_id: int, bot: Bot):
+    print(f"[DELIVER] Order {order_id} for user {user_id}")
+    try:
+        await bot.send_message(
+            user_id,
+            "✅ Ваш заказ успешно оплачен! Товар будет выдан в течение 5 минут.\n"
+            "(Это заглушка — в реальной версии здесь будет код/валюта.)"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+
+
+# --- Polling статусов ---
+async def poll_payments(bot: Bot):
+    while True:
+        try:
+            rows = await get_pending_orders()
+            for row in rows:
+                payment_id = row["payment_id"]
+                order_id = row["order_id"]
+                user_id = row["user_id"]
+
+                status = await check_payment_state(payment_id)
+                if status is None:
+                    continue
+
+                if status == "SUCCESS":
+                    await update_order_status(payment_id, "success")
+                    await deliver_item(order_id, user_id, bot)
+                elif status == "REJECTED":
+                    await update_order_status(payment_id, "rejected")
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            "❌ Оплата отклонена или отменена. Если вы оплатили — свяжитесь с поддержкой."
+                        )
+                    except Exception as e:
+                        print(f"Ошибка уведомления пользователя {user_id}: {e}")
+                elif status == "WAITING":
+                    pass
+                else:
+                    print(f"Unknown status for {payment_id}: {status}")
+
+        except Exception as e:
+            print("Polling error:", e)
+
+        await asyncio.sleep(10)
+
+
+# --- Тексты ---
+WELCOME_TEXT = (
+    "Добро пожаловать в Telegram-бот KotShop241! Мы работаем официально через Т-Банк "
+    "и даём возможность быстро и с гарантией пополнить любой сервис из нашего каталога. "
+    "Также помогаем находить недоступные игры в Steam для пользователей из РФ."
+)
+
+
+# --- Клавиатуры ---
+def kb_start():
+    b = InlineKeyboardBuilder()
+    b.button(text="Меню", callback_data="menu")
+    b.button(text="Оферта", callback_data="oferta")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def kb_menu():
+    b = InlineKeyboardBuilder()
+    b.button(text="Купить", callback_data="buy")
+    b.button(text="Поддержка", callback_data="support")
+    b.button(text="Турнир", callback_data="tournament")
+    b.button(text="Назад", callback_data="back_start")
+    b.adjust(2, 1, 1)
+    return b.as_markup()
+
+
+def kb_buy():
+    b = InlineKeyboardBuilder()
+    b.button(text="PUBG Mobile", callback_data="pubg")
+    b.button(text="Назад", callback_data="back_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_pubg():
+    b = InlineKeyboardBuilder()
+    b.button(text="Выбор определенного кол-во валюты", callback_data="pubg_fixed")
+    b.button(text="Уникальное кол-во валюты", callback_data="pubg_custom")
+    b.button(text="Назад", callback_data="back_buy")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_pubg_fixed():
+    b = InlineKeyboardBuilder()
+    b.button(text="60 UC", callback_data="pubg_60uc")
+    b.button(text="Назад", callback_data="back_pubg")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_confirm(game_id: str):
+    b = InlineKeyboardBuilder()
+    b.button(text="Все верно", callback_data=f"confirm_yes:{game_id}")
+    b.button(text="Неверный ID", callback_data="confirm_noid")
+    b.button(text="Я передумал", callback_data="confirm_cancel")
+    b.adjust(1)
+    return b.as_markup()
+
+
+# --- /start ---
+@dp.message(Command("start"))
+async def cmd_start(message):
+    await message.answer(WELCOME_TEXT, reply_markup=kb_start())
+
+
+# --- Старт → Меню / Оферта ---
+@dp.callback_query(F.data == "menu")
+async def cb_menu(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Выберите нужный раздел", reply_markup=kb_menu())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "oferta")
+async def cb_oferta(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "📄 Политика компании\n\n(Текст в написании)",
+        reply_markup=kb_start()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_start")
+async def cb_back_start(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(WELCOME_TEXT, reply_markup=kb_start())
+    await callback.answer()
+
+
+# --- Меню → разделы ---
+@dp.callback_query(F.data == "buy")
+async def cb_buy(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите нужную игру или напишите название игры для получения раздела покупки",
+        reply_markup=kb_buy()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "support")
+async def cb_support(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("Связь с поддержкой: @kotshop241_support")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tournament")
+async def cb_tournament(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("🏆 Турнирный раздел в разработке")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_menu")
+async def cb_back_menu(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Выберите нужный раздел", reply_markup=kb_menu())
+    await callback.answer()
+
+
+# --- Купить → игры ---
+@dp.callback_query(F.data == "pubg")
+async def cb_pubg(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите удобный способ получения игровой валюты",
+        reply_markup=kb_pubg()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_buy")
+async def cb_back_buy(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите нужную игру или напишите название игры для получения раздела покупки",
+        reply_markup=kb_buy()
+    )
+    await callback.answer()
+
+
+# --- PUBG → способы получения ---
+@dp.callback_query(F.data == "pubg_fixed")
+async def cb_pubg_fixed(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите нужное количество игровой валюты на ваш аккаунт с фиксированной суммой, "
+        "если не найдёте нужное количество, попробуйте создать заказ (Уникальное кол-во валюты)",
+        reply_markup=kb_pubg_fixed()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "pubg_custom")
+async def cb_pubg_custom(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("Раздел «Уникальное кол-во валюты» в разработке")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_pubg")
+async def cb_back_pubg(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите удобный способ получения игровой валюты",
+        reply_markup=kb_pubg()
+    )
+    await callback.answer()
+
+
+# --- 60 UC → ввод ID ---
+@dp.callback_query(F.data == "pubg_60uc")
+async def cb_pubg_60uc(callback, state: FSMContext):
+    await state.set_state(OrderFlow.waiting_for_id)
+    await callback.message.edit_text("Укажите ваш ID который должен начинаться на 5")
+    await callback.answer()
+
+
+@dp.message(OrderFlow.waiting_for_id)
+async def process_game_id(message, state: FSMContext):
+    game_id = message.text.strip()
+
+    if not game_id.isdigit() or not game_id.startswith("5"):
+        await message.answer(
+            "❌ ID должен состоять только из цифр и начинаться на 5. Попробуйте ещё раз."
+        )
         return
-    text = "Ваши заказы:\n"
-    for r in rows:
-        # r = (id, user_id, order_id, amount, status, created_at)
-        text += f"- №{r[0]}: {r[2]} | {r[3]} ₽ | статус: {r[4]} | {r[5]}\n"
-    await message.answer(text)
-    
+
+    await save_game_id(message.from_user.id, game_id)
+    await state.clear()
+
+    await message.answer(
+        f"Вы выбрали товар 60 UC стоимостью в 79 рублей\n"
+        f"Ваш ID: {game_id}",
+        reply_markup=kb_confirm(game_id)
+    )
+
+
+# --- Подтверждение заказа ---
+@dp.callback_query(F.data.startswith("confirm_yes"))
+async def cb_confirm_yes(callback, state: FSMContext):
+    await state.clear()
+    game_id = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    order_id = f"order-{user_id}-{int(asyncio.get_event_loop().time())}"
+    amount_kopecks = 7900  # 79 рублей
+
+    result = await create_payment(
+        order_id,
+        amount_kopecks,
+        description=f"Покупка 60 UC для PUBG Mobile. Игровой ID: {game_id}"
+    )
+    if not result:
+        await callback.message.edit_text("Не удалось создать платёж. Попробуйте позже.")
+        await callback.answer()
+        return
+
+    payment_id = result["payment_id"]
+    pay_url = result["payment_url"]
+    await save_order(payment_id, order_id, user_id, amount_kopecks)
+
+    b = InlineKeyboardBuilder()
+    b.button(text="Оплатить 79 ₽", url=pay_url)
+    b.adjust(1)
+
+    await callback.message.edit_text(
+        f"Заказ #{order_id}\n"
+        f"Товар: 60 UC\n"
+        f"Ваш ID: {game_id}\n"
+        f"Сумма: 79 ₽\n\n"
+        f"Нажмите «Оплатить», чтобы завершить покупку.",
+        reply_markup=b.as_markup()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "confirm_noid")
+async def cb_confirm_noid(callback, state: FSMContext):
+    await state.set_state(OrderFlow.waiting_for_id)
+    await callback.message.edit_text("Укажите ваш ID который должен начинаться на 5")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "confirm_cancel")
+async def cb_confirm_cancel(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Выберите удобный способ получения игровой валюты",
+        reply_markup=kb_pubg()
+    )
+    await callback.answer()
+
+
+# --- Main ---
 async def main():
-    init_db()
-    logger.info("Starting bot...")
+    await init_db()
+    asyncio.create_task(poll_payments(bot))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
