@@ -244,13 +244,16 @@ async def cb_confirm_yes(callback, state: FSMContext):
                     "game_id": game_id,
                     "user_id": user_id,
                     "description": f"Покупка 60 UC для PUBG Mobile. Игровой ID: {game_id}",
+                    "email": "noreply@kotshop241.ru",
                 }
             ) as resp:
                 data = await resp.json()
 
         if not data.get("success"):
+            err = data.get("error", "неизвестная ошибка")
+            print(f"Ошибка создания платежа: {data}")
             await callback.message.edit_text(
-                "Не удалось создать платёж. Попробуйте позже."
+                f"Не удалось создать платёж: {err}. Попробуйте позже."
             )
             await callback.answer()
             return
