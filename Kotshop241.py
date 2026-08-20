@@ -50,19 +50,40 @@ WELCOME_TEXT = (
     "Также помогаем находить недоступные игры в Steam для пользователей из РФ."
 )
 
+POLICY_TEXT = (
+    "Магазин KotShop241 является официальным продавцом виртуальных товаров и осуществляет "
+    "все расчёты в строгом соответствии с действующим законодательством Российской Федерации, "
+    "включая требования Федерального закона «О национальной платёжной системе» и иные "
+    "нормативно‑правовые акты, регулирующие оборот цифровых товаров и проведение платежей.\n\n"
+    "Реализация товаров осуществляется исключительно в рамках заключённого публичного "
+    "договора‑оферты, размещённого на официальном ресурсе магазина. Приобретение игровой "
+    "валюты, игр и иных виртуальных товаров подтверждает согласие покупателя с условиями "
+    "оферты и правилами работы магазина.\n\n"
+    "Любые действия, направленные на нарушение установленных правил, в том числе попытки "
+    "неправомерного получения выгоды, обхода платёжных механизмов, использования "
+    "мошеннических схем либо иного злоупотребления условиями предоставления услуг, "
+    "расцениваются как существенное нарушение договорных обязательств и могут "
+    "квалифицироваться как противоправные деяния. Такие действия могут служить основанием "
+    "для обращения в правоохранительные органы, а собранные материалы — быть использованы "
+    "в качестве доказательной базы в рамках административного или уголовного производства "
+    "в соответствии с Уголовным кодексом Российской Федерации и Кодексом Российской "
+    "Федерации об административных правонарушениях.\n\n"
+    "Магазин KotShop241 реализует игровую валюту, игровые аккаунты, внутриигровые предметы, "
+    "ключи активации игр и иные виртуальные товары для популярных игровых платформ и "
+    "сервисов. Ассортимент и условия реализации товаров определяются действующими правилами "
+    "магазина и положениями оферты, обязательными для ознакомления перед совершением покупки."
+)
+
 
 # ─── Файл для сохранения ожидающих платежей ───
 PENDING_FILE = os.getenv("PENDING_FILE", "pending_payments.json")
-# Таймаут платежа — 10 минут (600 сек)
 PAYMENT_TIMEOUT = 600
-# При старте загружаем платежи за последние 15 минут (900 сек)
 STARTUP_LOAD_WINDOW = 900
 
 pending_payments: dict[str, dict] = {}
 
 
 def save_pending_to_file():
-    """Сохраняет pending_payments в JSON-файл."""
     try:
         with open(PENDING_FILE, "w", encoding="utf-8") as f:
             json.dump(pending_payments, f, ensure_ascii=False, indent=2)
@@ -71,10 +92,6 @@ def save_pending_to_file():
 
 
 def load_pending_from_file():
-    """
-    Загружает pending_payments из JSON-файла.
-    Берёт только платежи, созданные в течение последних STARTUP_LOAD_WINDOW секунд.
-    """
     global pending_payments
     try:
         with open(PENDING_FILE, "r", encoding="utf-8") as f:
@@ -99,7 +116,7 @@ def load_pending_from_file():
 def kb_start():
     b = InlineKeyboardBuilder()
     b.button(text="Меню", callback_data="menu")
-    b.button(text="Оферта", callback_data="oferta")
+    b.button(text="Политика компании", callback_data="oferta")
     b.adjust(2)
     return b.as_markup()
 
@@ -155,15 +172,15 @@ def kb_back_to_menu():
     return b.as_markup()
 
 
+def kb_policy():
+    b = InlineKeyboardBuilder()
+    b.button(text="Меню", callback_data="menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
 # ─── Запрос статуса платежа к VPS ───
 async def vps_check_payment(order_id: str) -> bool | None:
-    """
-    Запрашивает у VPS статус платежа.
-    Возвращает:
-      True  — оплачен
-      False — не оплачен (ещё ждёт)
-      None  — ошибка запроса
-    """
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -187,11 +204,6 @@ async def vps_check_payment(order_id: str) -> bool | None:
 
 # ─── Фоновая задача: проверка статуса платежей ───
 async def check_payments_loop():
-    """
-    Каждые 15 секунд опрашивает VPS /check-payment.
-    Если платёж подтверждён — отправляет уведомление пользователю.
-    Если прошло больше 10 минут — удаляет сообщение со ссылкой и присылает сообщение о таймауте.
-    """
     logger.info("Запущен цикл проверки платежей (интервал 15 сек, таймаут 600 сек)")
     while True:
         await asyncio.sleep(15)
@@ -200,17 +212,13 @@ async def check_payments_loop():
 
         for order_id, info in list(pending_payments.items()):
             try:
-                # ── Проверка таймаута (10 минут) ──
                 if now - info["created_at"] > PAYMENT_TIMEOUT:
                     logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
-
-                    # Удаляем сообщение со ссылкой на оплату
                     try:
                         await bot.delete_message(info["chat_id"], info["message_id"])
                     except Exception as e:
                         logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
 
-                    # Отправляем сообщение о таймауте
                     await bot.send_message(
                         info["chat_id"],
                         "Похоже, платёж прервался. Ничего страшного — "
@@ -220,39 +228,29 @@ async def check_payments_loop():
                     to_remove.append(order_id)
                     continue
 
-                # ── Запрос статуса через VPS ──
                 paid = await vps_check_payment(order_id)
 
                 if paid is None:
-                    # Ошибка запроса — попробуем в следующий раз
                     continue
 
                 if not paid:
-                    # Платёж ещё не подтверждён — ждём дальше
                     continue
 
-                # ── Платёж подтверждён ──
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
-                # 1) Отправляем «Оплата выполнена»
                 notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
-
-                # 2) Пауза, чтобы пользователь увидел сообщение
                 await asyncio.sleep(2)
 
-                # 3) Удаляем сообщение «Оплата выполнена»
                 try:
                     await notify_msg.delete()
                 except Exception as e:
                     logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
 
-                # 4) Удаляем сообщение со ссылкой на оплату
                 try:
                     await bot.delete_message(info["chat_id"], info["message_id"])
                 except Exception as e:
                     logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
 
-                # 5) Проверяем название товара на наличие «UC»
                 if "UC" in info.get("product_name", ""):
                     await bot.send_message(
                         info["chat_id"],
@@ -273,7 +271,6 @@ async def check_payments_loop():
                 logger.error(traceback.format_exc())
                 continue
 
-        # Чистим завершённые/истёкшие платежи
         if to_remove:
             for order_id in to_remove:
                 pending_payments.pop(order_id, None)
@@ -297,10 +294,7 @@ async def cb_menu(callback, state: FSMContext):
 @dp.callback_query(F.data == "oferta")
 async def cb_oferta(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
-        "📄 Политика компании\n\n(Текст в написании)",
-        reply_markup=kb_start()
-    )
+    await callback.message.edit_text(POLICY_TEXT, reply_markup=kb_policy())
     await callback.answer()
 
 
@@ -427,7 +421,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
 
     logger.info(f"Создание платежа: order_id={order_id}, user_id={user_id}, game_id={game_id}, amount={amount_kopecks}")
 
-    # Запрос к VPS-бэкенду на создание платежа
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -513,7 +506,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
         reply_markup=b.as_markup()
     )
 
-    # ── Сохраняем информацию о платеже для фонового мониторинга ──
     pending_payments[order_id] = {
         "user_id": user_id,
         "chat_id": callback.message.chat.id,
@@ -561,7 +553,6 @@ async def main():
     logger.info("BotHost бот запущен")
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
 
-    # Загружаем ожидающие платежи из файла (за последние 15 минут)
     load_pending_from_file()
 
     asyncio.create_task(check_payments_loop())
