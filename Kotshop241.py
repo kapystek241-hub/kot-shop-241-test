@@ -1,5 +1,6 @@
 import asyncio
 import os
+import uuid
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -13,13 +14,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 
-# Явно указываем путь к .env рядом со скриптом
 _env_path = Path(__file__).parent / ".env"
 load_dotenv(_env_path)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "kotshop.db")
 VPS_API_URL = os.getenv("VPS_API_URL", "http://157.22.252.246:8000")
+FAZER_API_KEY = os.getenv("FAZER_API_KEY")
+FAZER_API_URL = "https://api.fzr.cards/api/v2"
+
+PUBG_CATEGORY_ID = "pubg_mobile_fast"
+PUBG_60UC_OFFER_ID = "60_uc"
 
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения: BOT_TOKEN")
@@ -48,7 +53,9 @@ def _init_db_sync():
             order_id TEXT NOT NULL,
             user_id INTEGER NOT NULL,
             amount_kopecks INTEGER NOT NULL,
+            game_id TEXT,
             status TEXT NOT NULL DEFAULT 'new',
+            fazer_order_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -62,14 +69,14 @@ def _init_db_sync():
     conn.close()
 
 
-def _save_order_sync(payment_id, order_id, user_id, amount_kopecks):
+def _save_order_sync(payment_id, order_id, user_id, amount_kopecks, game_id=None):
     now = datetime.utcnow().isoformat()
     conn = _db_connect()
     try:
         conn.execute(
-            "INSERT INTO orders (payment_id, order_id, user_id, amount_kopecks, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (payment_id, order_id, user_id, amount_kopecks, "new", now, now)
+            "INSERT INTO orders (payment_id, order_id, user_id, amount_kopecks, game_id, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (payment_id, order_id, user_id, amount_kopecks, game_id, "new", now, now)
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -98,6 +105,26 @@ def _update_order_status_sync(payment_id, status):
     conn.close()
 
 
+def _update_fazer_order_id_sync(payment_id, fazer_order_id):
+    now = datetime.utcnow().isoformat()
+    conn = _db_connect()
+    conn.execute(
+        "UPDATE orders SET fazer_order_id = ?, updated_at = ? WHERE payment_id = ?",
+        (fazer_order_id, now, payment_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_delivering_orders_sync():
+    conn = _db_connect()
+    rows = conn.execute(
+        "SELECT * FROM orders WHERE status = 'success' AND fazer_order_id IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def _save_game_id_sync(user_id, game_id):
     now = datetime.utcnow().isoformat()
     conn = _db_connect()
@@ -124,29 +151,36 @@ async def init_db():
     await asyncio.to_thread(_init_db_sync)
 
 
-async def save_order(payment_id: str, order_id: str, user_id: int, amount_kopecks: int):
-    await asyncio.to_thread(_save_order_sync, payment_id, order_id, user_id, amount_kopecks)
+async def save_order(payment_id, order_id, user_id, amount_kopecks, game_id=None):
+    await asyncio.to_thread(_save_order_sync, payment_id, order_id, user_id, amount_kopecks, game_id)
 
 
 async def get_pending_orders():
     return await asyncio.to_thread(_get_pending_orders_sync)
 
 
-async def update_order_status(payment_id: str, status: str):
+async def update_order_status(payment_id, status):
     await asyncio.to_thread(_update_order_status_sync, payment_id, status)
 
 
-async def save_game_id(user_id: int, game_id: str):
+async def update_fazer_order_id(payment_id, fazer_order_id):
+    await asyncio.to_thread(_update_fazer_order_id_sync, payment_id, fazer_order_id)
+
+
+async def get_delivering_orders():
+    return await asyncio.to_thread(_get_delivering_orders_sync)
+
+
+async def save_game_id(user_id, game_id):
     await asyncio.to_thread(_save_game_id_sync, user_id, game_id)
 
 
-async def get_game_id(user_id: int) -> str | None:
+async def get_game_id(user_id):
     return await asyncio.to_thread(_get_game_id_sync, user_id)
 
 
 # --- Обращение к VPS для создания платежа ---
 async def create_payment(user_id: int, order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
-    """Создаёт платёж через VPS (FastAPI), который сам обращается к Т-Банку."""
     amount_rub = amount_kopecks / 100
     payload = {
         "user_id": user_id,
@@ -162,7 +196,7 @@ async def create_payment(user_id: int, order_id: str, amount_kopecks: int, descr
                 data = await resp.json()
                 if data.get("success"):
                     return {
-                        "payment_id": str(data["data"]["OrderId"]),
+                        "payment_id": str(data["data"]["PaymentId"]),
                         "payment_url": data["data"]["PaymentURL"],
                     }
                 else:
@@ -175,7 +209,6 @@ async def create_payment(user_id: int, order_id: str, amount_kopecks: int, descr
 
 # --- Обращение к VPS для проверки статуса ---
 async def check_payment_state(payment_id: str) -> str | None:
-    """Проверяет статус платежа через VPS (FastAPI)."""
     payload = {"payment_id": payment_id}
 
     timeout = aiohttp.ClientTimeout(total=10)
@@ -193,20 +226,114 @@ async def check_payment_state(payment_id: str) -> str | None:
             return None
 
 
-# --- Логика выдачи товара (заглушка) ---
-async def deliver_item(order_id: str, user_id: int, bot: Bot):
-    print(f"[DELIVER] Order {order_id} for user {user_id}")
-    try:
-        await bot.send_message(
-            user_id,
-            "✅ Ваш заказ успешно оплачен! Товар будет выдан в течение 5 минут.\n"
-            "(Это заглушка — в реальной версии здесь будет код/валюта.)"
-        )
-    except Exception as e:
-        print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+# --- FazerCards: размещение заказа ---
+async def fazer_topup_order(category_id: str, offer_id: str, player_id: str) -> dict | None:
+    headers = {
+        "X-API-Key": FAZER_API_KEY,
+        "Content-Type": "application/json",
+        "Idempotency-Key": str(uuid.uuid4()),
+    }
+    body = {
+        "category_id": category_id,
+        "offer_id": offer_id,
+        "fields": {
+            "player_id": player_id,
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{FAZER_API_URL}/topups/order", json=body, headers=headers) as resp:
+            try:
+                data = await resp.json()
+            except Exception:
+                print("Ошибка парсинга JSON от FazerCards")
+                return None
+
+            if data.get("ok") and "order" in data:
+                return data["order"]
+            else:
+                print("FazerCards order error:", data)
+                return None
 
 
-# --- Polling статусов ---
+# --- FazerCards: проверка статуса заказа ---
+async def fazer_check_order(fazer_order_id: str) -> str | None:
+    headers = {
+        "X-API-Key": FAZER_API_KEY,
+    }
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(f"{FAZER_API_URL}/orders/{fazer_order_id}", headers=headers) as resp:
+            try:
+                data = await resp.json()
+            except Exception:
+                print("Ошибка парсинга JSON при проверке FazerCards заказа")
+                return None
+
+            if data.get("ok") and "order" in data:
+                return data["order"].get("status")
+            else:
+                print("FazerCards status error:", data)
+                return None
+
+
+# --- Логика выдачи товара ---
+async def deliver_item(order_id: str, user_id: int, game_id: str, bot: Bot, payment_id: str):
+    print(f"[DELIVER] Order {order_id} for user {user_id}, game_id={game_id}")
+
+    order = await fazer_topup_order(PUBG_CATEGORY_ID, PUBG_60UC_OFFER_ID, game_id)
+    if not order:
+        try:
+            await bot.send_message(
+                user_id,
+                "❌ Не удалось автоматически начислить UC. Свяжитесь с поддержкой: @kotshop241_support\n"
+                f"Номер вашего заказа: {order_id}"
+            )
+        except Exception as e:
+            print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+        return
+
+    fazer_order_id = order.get("id")
+    fazer_status = order.get("status", "processing")
+
+    if fazer_order_id:
+        await update_fazer_order_id(payment_id, fazer_order_id)
+
+    if fazer_status == "completed":
+        try:
+            await bot.send_message(
+                user_id,
+                "✅ 60 UC успешно зачислены на ваш аккаунт PUBG Mobile!\n"
+                f"ID игрока: {game_id}\n"
+                f"Заказ: {fazer_order_id}"
+            )
+        except Exception as e:
+            print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+    elif fazer_status == "processing":
+        try:
+            await bot.send_message(
+                user_id,
+                "⏳ Ваш заказ принят в обработку. 60 UC будут зачислены в течение нескольких минут.\n"
+                f"ID игрока: {game_id}\n"
+                f"Заказ: {fazer_order_id}\n\n"
+                "Мы уведомим вас, когда зачисление будет завершено."
+            )
+        except Exception as e:
+            print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+    else:
+        try:
+            await bot.send_message(
+                user_id,
+                f"📦 Статус заказа: {fazer_status}\n"
+                f"ID игрока: {game_id}\n"
+                f"Заказ: {fazer_order_id}\n\n"
+                "Если возникли проблемы — свяжитесь с поддержкой: @kotshop241_support"
+            )
+        except Exception as e:
+            print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+
+
+# --- Polling статусов оплат Т-Банка (через VPS) ---
 async def poll_payments(bot: Bot):
     while True:
         try:
@@ -215,6 +342,7 @@ async def poll_payments(bot: Bot):
                 payment_id = row["payment_id"]
                 order_id = row["order_id"]
                 user_id = row["user_id"]
+                game_id = row["game_id"]
 
                 status = await check_payment_state(payment_id)
                 if status is None:
@@ -222,7 +350,18 @@ async def poll_payments(bot: Bot):
 
                 if status == "SUCCESS":
                     await update_order_status(payment_id, "success")
-                    await deliver_item(order_id, user_id, bot)
+                    if game_id:
+                        await deliver_item(order_id, user_id, game_id, bot, payment_id)
+                    else:
+                        print(f"Нет game_id для заказа {order_id}")
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                "✅ Оплата получена, но не удалось определить игровой ID. "
+                                "Свяжитесь с поддержкой: @kotshop241_support"
+                            )
+                        except Exception:
+                            pass
                 elif status == "REJECTED":
                     await update_order_status(payment_id, "rejected")
                     try:
@@ -241,6 +380,48 @@ async def poll_payments(bot: Bot):
             print("Polling error:", e)
 
         await asyncio.sleep(10)
+
+
+# --- Polling статусов заказов FazerCards (доставка) ---
+async def poll_fazer_orders(bot: Bot):
+    while True:
+        try:
+            rows = await get_delivering_orders()
+            for row in rows:
+                fazer_order_id = row["fazer_order_id"]
+                user_id = row["user_id"]
+                game_id = row["game_id"]
+                payment_id = row["payment_id"]
+
+                fazer_status = await fazer_check_order(fazer_order_id)
+                if fazer_status is None:
+                    continue
+
+                if fazer_status == "completed":
+                    await update_order_status(payment_id, "delivered")
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            "✅ 60 UC успешно зачислены на ваш аккаунт PUBG Mobile!\n"
+                            f"ID игрока: {game_id}\n"
+                            f"Заказ: {fazer_order_id}"
+                        )
+                    except Exception as e:
+                        print(f"Ошибка уведомления пользователя {user_id}: {e}")
+                elif fazer_status == "failed":
+                    await update_order_status(payment_id, "deliver_failed")
+                    try:
+                        await bot.send_message(
+                            user_id,
+                            "❌ Не удалось зачислить UC. Свяжитесь с поддержкой: @kotshop241_support\n"
+                            f"Заказ: {fazer_order_id}"
+                        )
+                    except Exception as e:
+                        print(f"Ошибка уведомления пользователя {user_id}: {e}")
+        except Exception as e:
+            print("FazerCards polling error:", e)
+
+        await asyncio.sleep(30)
 
 
 # --- Тексты ---
@@ -467,7 +648,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
 
     payment_id = result["payment_id"]
     pay_url = result["payment_url"]
-    await save_order(payment_id, order_id, user_id, amount_kopecks)
+    await save_order(payment_id, order_id, user_id, amount_kopecks, game_id=game_id)
 
     b = InlineKeyboardBuilder()
     b.button(text="Оплатить 79 ₽", url=pay_url)
@@ -505,6 +686,7 @@ async def cb_confirm_cancel(callback, state: FSMContext):
 async def main():
     await init_db()
     asyncio.create_task(poll_payments(bot))
+    asyncio.create_task(poll_fazer_orders(bot))
     await dp.start_polling(bot)
 
 
