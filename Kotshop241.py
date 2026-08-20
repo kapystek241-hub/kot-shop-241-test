@@ -1,15 +1,15 @@
 import asyncio
 import os
 import hashlib
+import hmac
 import sqlite3
 from datetime import datetime
 
 import aiohttp
-import certifi
-import ssl
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
@@ -28,9 +28,6 @@ API_URL = "https://securepay.tinkoff.ru/v2"  # продакшн
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# SSL-контекст с сертификатами Минцифры
-_ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 
 # --- FSM States ---
@@ -149,26 +146,16 @@ async def get_game_id(user_id: int) -> str | None:
     return await asyncio.to_thread(_get_game_id_sync, user_id)
 
 
-# --- Подпись для Т-Банка ---
-def sign_payload(payload: dict, password: str) -> str:
-    """Генерируем Token по алгоритму Т-Банка:
-    1. Добавляем Password в массив полей
-    2. Исключаем Token и Receipt
-    3. Сортируем по ключу в алфавитном порядке
-    4. Склеиваем значения
-    5. Считаем SHA-256
-    """
-    if not password:
-        raise ValueError("Секретный ключ (TBANK_PASSWORD) отсутствует или пуст!")
-
-    token_data = {
-        k: v for k, v in payload.items()
-        if k not in ("Token", "Receipt")
-    }
-    token_data["Password"] = password
-    sorted_values = "".join(str(v) for k, v in sorted(token_data.items()))
-
-    return hashlib.sha256(sorted_values.encode("utf-8")).hexdigest()
+# --- Подпись для Т‑Банка ---
+def sign_payload(payload: dict, secret: str) -> str:
+    keys = sorted(k for k in payload.keys() if payload[k] is not None)
+    pairs = [f"{k}={payload[k]}" for k in keys]
+    base_string = "&".join(pairs)
+    return hmac.new(
+        secret.encode("utf-8"),
+        base_string.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
 
 
 async def create_payment(order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
@@ -178,34 +165,16 @@ async def create_payment(order_id: str, amount_kopecks: int, description: str = 
         "OrderId": order_id,
         "Description": description or f"Покупка игровой валюты: {order_id}",
     }
-
-    # Токен считаем БЕЗ Receipt
     token = sign_payload(payload, TBANK_PASSWORD)
     payload["Token"] = token
 
-    # Receipt добавляем ПОСЛЕ расчёта токена (требование 54-ФЗ)
-    payload["Receipt"] = {
-        "Email": "customer@kotshop241.com",
-        "Taxation": "osn",
-        "Items": [{
-            "Name": "Игровая валюта",
-            "Price": amount_kopecks,
-            "Quantity": 1,
-            "Amount": amount_kopecks,
-            "Tax": "none"
-        }]
-    }
-
     timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=aiohttp.TCPConnector(ssl=_ssl_context)
-    ) as session:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(f"{API_URL}/Init", json=payload) as resp:
             try:
                 data = await resp.json()
             except Exception:
-                print("Ошибка парсинга JSON от Т-Банка")
+                print("Ошибка парсинга JSON от Т‑Банка")
                 return None
 
             if data.get("Success") is True and "PaymentId" in data and "PaymentURL" in data:
@@ -227,10 +196,7 @@ async def check_payment_state(payment_id: str) -> str | None:
     payload["Token"] = token
 
     timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=aiohttp.TCPConnector(ssl=_ssl_context)
-    ) as session:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(f"{API_URL}/GetState", json=payload) as resp:
             try:
                 data = await resp.json()
