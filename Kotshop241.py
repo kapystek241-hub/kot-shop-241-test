@@ -50,6 +50,12 @@ WELCOME_TEXT = (
     "Также помогаем находить недоступные игры в Steam для пользователей из РФ."
 )
 
+MENU_TEXT = (
+    "Магазин работает круглосуточно, за исключением технических работ. "
+    "О проведении технических работ сообщается в группе @KotShop241 — "
+    "подпишитесь, чтобы получать актуальную информацию."
+)
+
 POLICY_TEXT = (
     "Магазин KotShop241 является официальным продавцом виртуальных товаров и осуществляет "
     "все расчёты в строгом соответствии с действующим законодательством Российской Федерации, "
@@ -141,16 +147,23 @@ def kb_buy():
 
 def kb_pubg():
     b = InlineKeyboardBuilder()
-    b.button(text="Выбор определенного кол-во валюты", callback_data="pubg_fixed")
-    b.button(text="Уникальное кол-во валюты", callback_data="pubg_custom")
+    b.button(text="Купить UC по ID", callback_data="pubg_buy_uc")
+    b.button(text="Другие товары", callback_data="pubg_other")
     b.button(text="Назад", callback_data="back_buy")
     b.adjust(1)
     return b.as_markup()
 
 
-def kb_pubg_fixed():
+def kb_pubg_products():
     b = InlineKeyboardBuilder()
     b.button(text="60 UC", callback_data="pubg_60uc")
+    b.button(text="Назад", callback_data="back_pubg")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_pubg_other():
+    b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(1)
     return b.as_markup()
@@ -277,6 +290,15 @@ async def check_payments_loop():
             save_pending_to_file()
 
 
+# ─── Вспомогательная функция: удалить старое сообщение и отправить новое ───
+async def delete_and_answer(callback, text, reply_markup=None):
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.message.answer(text, reply_markup=reply_markup)
+
+
 # ─── Хендлеры ───
 @dp.message(Command("start"))
 async def cmd_start(message):
@@ -287,30 +309,31 @@ async def cmd_start(message):
 @dp.callback_query(F.data == "menu")
 async def cb_menu(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Выберите нужный раздел", reply_markup=kb_menu())
+    await delete_and_answer(callback, MENU_TEXT, kb_menu())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "oferta")
 async def cb_oferta(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(POLICY_TEXT, reply_markup=kb_policy())
+    await delete_and_answer(callback, POLICY_TEXT, kb_policy())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_start")
 async def cb_back_start(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(WELCOME_TEXT, reply_markup=kb_start())
+    await delete_and_answer(callback, WELCOME_TEXT, kb_start())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "buy")
 async def cb_buy(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
+    await delete_and_answer(
+        callback,
         "Выберите нужную игру или напишите название игры для получения раздела покупки",
-        reply_markup=kb_buy()
+        kb_buy(),
     )
     await callback.answer()
 
@@ -318,30 +341,31 @@ async def cb_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "support")
 async def cb_support(callback, state: FSMContext):
     await state.clear()
-    await callback.message.answer("Связь с поддержкой: @kotshop241_support")
+    await delete_and_answer(callback, "Связь с поддержкой: @kotshop241_support", kb_menu())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "tournament")
 async def cb_tournament(callback, state: FSMContext):
     await state.clear()
-    await callback.message.answer("🏆 Турнирный раздел в разработке")
+    await delete_and_answer(callback, "🏆 Турнирный раздел в разработке", kb_menu())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_menu")
 async def cb_back_menu(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Выберите нужный раздел", reply_markup=kb_menu())
+    await delete_and_answer(callback, MENU_TEXT, kb_menu())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "pubg")
 async def cb_pubg(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
-        "Выберите удобный способ получения игровой валюты",
-        reply_markup=kb_pubg()
+    await delete_and_answer(
+        callback,
+        "Выберите нужный раздел",
+        kb_pubg(),
     )
     await callback.answer()
 
@@ -349,37 +373,43 @@ async def cb_pubg(callback, state: FSMContext):
 @dp.callback_query(F.data == "back_buy")
 async def cb_back_buy(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
+    await delete_and_answer(
+        callback,
         "Выберите нужную игру или напишите название игры для получения раздела покупки",
-        reply_markup=kb_buy()
+        kb_buy(),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "pubg_fixed")
-async def cb_pubg_fixed(callback, state: FSMContext):
+@dp.callback_query(F.data == "pubg_buy_uc")
+async def cb_pubg_buy_uc(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
-        "Выберите нужное количество игровой валюты на ваш аккаунт с фиксированной суммой, "
-        "если не найдёте нужное количество, попробуйте создать заказ (Уникальное кол-во валюты)",
-        reply_markup=kb_pubg_fixed()
+    await delete_and_answer(
+        callback,
+        "Выберите интересующий товар для игры PUBG Mobile",
+        kb_pubg_products(),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "pubg_custom")
-async def cb_pubg_custom(callback, state: FSMContext):
+@dp.callback_query(F.data == "pubg_other")
+async def cb_pubg_other(callback, state: FSMContext):
     await state.clear()
-    await callback.message.answer("Раздел «Уникальное кол-во валюты» в разработке")
+    await delete_and_answer(
+        callback,
+        "На данный момент этот раздел в разработке",
+        kb_pubg_other(),
+    )
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_pubg")
 async def cb_back_pubg(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
-        "Выберите удобный способ получения игровой валюты",
-        reply_markup=kb_pubg()
+    await delete_and_answer(
+        callback,
+        "Выберите нужный раздел",
+        kb_pubg(),
     )
     await callback.answer()
 
@@ -387,7 +417,11 @@ async def cb_back_pubg(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_60uc")
 async def cb_pubg_60uc(callback, state: FSMContext):
     await state.set_state(OrderFlow.waiting_for_id)
-    await callback.message.edit_text("Укажите ваш ID который должен начинаться на 5")
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.message.answer("Укажите ваш ID который должен начинаться на 5")
     await callback.answer()
 
 
@@ -443,9 +477,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
                     raw_text = await resp.text()
                     logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
                     logger.error(f"Сырой ответ: {raw_text[:500]}")
-                    await callback.message.edit_text(
-                        "Сервер вернул некорректный ответ. Попробуйте позже."
-                    )
+                    try:
+                        await callback.message.delete()
+                    except Exception:
+                        pass
+                    await callback.message.answer("Сервер вернул некорректный ответ. Попробуйте позже.")
                     await callback.answer()
                     return
 
@@ -454,7 +490,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
         if not data.get("success"):
             err = data.get("error", "неизвестная ошибка")
             logger.error(f"Бэкенд отклонил платёж: {data}")
-            await callback.message.edit_text(
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(
                 f"❌ Не удалось создать платёж: {err}\n\n"
                 f"Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
             )
@@ -468,7 +508,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
     except aiohttp.ClientConnectorError as e:
         logger.error(f"Не удалось подключиться к VPS-бэкенду: {e}")
         logger.error(f"Проверьте VPS_API_URL={VPS_API_URL} и открыт ли порт 8080 на VPS")
-        await callback.message.edit_text(
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
             "❌ Не удалось подключиться к серверу оплаты.\n"
             "Проверьте, что VPS запущен и порт 8080 открыт.\n\n"
             "Поддержка: @kotshop241_support"
@@ -478,7 +522,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
 
     except asyncio.TimeoutError:
         logger.error(f"Таймаут при запросе к VPS-бэкенду (15 сек). URL: {VPS_API_URL}")
-        await callback.message.edit_text(
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
             "❌ Сервер оплаты не ответил вовремя. Попробуйте позже."
         )
         await callback.answer()
@@ -487,7 +535,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
     except Exception as e:
         logger.error(f"Непредвиденная ошибка при создании платежа: {e}")
         logger.error(traceback.format_exc())
-        await callback.message.edit_text(
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(
             "❌ Произошла ошибка. Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
         )
         await callback.answer()
@@ -497,7 +549,12 @@ async def cb_confirm_yes(callback, state: FSMContext):
     b.button(text="Оплатить 79 ₽", url=pay_url)
     b.adjust(1)
 
-    payment_msg = await callback.message.edit_text(
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+
+    payment_msg = await callback.message.answer(
         f"Заказ #{order_id}\n"
         f"Товар: 60 UC\n"
         f"Ваш ID: {game_id}\n"
@@ -526,16 +583,21 @@ async def cb_confirm_yes(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_noid")
 async def cb_confirm_noid(callback, state: FSMContext):
     await state.set_state(OrderFlow.waiting_for_id)
-    await callback.message.edit_text("Укажите ваш ID который должен начинаться на 5")
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.message.answer("Укажите ваш ID который должен начинаться на 5")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(
-        "Выберите удобный способ получения игровой валюты",
-        reply_markup=kb_pubg()
+    await delete_and_answer(
+        callback,
+        "Выберите нужный раздел",
+        kb_pubg(),
     )
     await callback.answer()
 
