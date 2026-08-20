@@ -4,6 +4,7 @@ import os
 import logging
 import traceback
 import time
+import hashlib
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -26,6 +27,8 @@ logger = logging.getLogger("kotshop-bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VPS_API_URL = os.getenv("VPS_API_URL")  # например: http://123.45.67.89:8080
 API_SECRET = os.getenv("API_SECRET", "change-me")
+TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
+TBANK_PASSWORD = os.getenv("TBANK_PASSWORD")
 
 if not all([BOT_TOKEN, VPS_API_URL]):
     raise ValueError("Не заданы переменные окружения: BOT_TOKEN, VPS_API_URL")
@@ -33,9 +36,15 @@ if not all([BOT_TOKEN, VPS_API_URL]):
 logger.info(f"VPS_API_URL = {VPS_API_URL}")
 logger.info(f"API_SECRET задан: {'да' if API_SECRET != 'change-me' else 'НЕТ (значение по умолчанию!)'}")
 
+if not all([TBANK_TERMINAL_KEY, TBANK_PASSWORD]):
+    logger.warning("TBANK_TERMINAL_KEY / TBANK_PASSWORD не заданы — прямая проверка оплаты работать не будет!")
+else:
+    logger.info("TBANK_TERMINAL_KEY задан — прямая проверка оплаты активна")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+TBANK_API_URL = "https://securepay.tinkoff.ru/v2"
 
 # ─── FSM ───
 class OrderFlow(StatesGroup):
@@ -51,7 +60,6 @@ WELCOME_TEXT = (
 
 
 # ─── Хранилище ожидающих платежей ───
-# Ключ — order_id, значение — dict с информацией о заказе
 pending_payments: dict[str, dict] = {}
 
 
@@ -109,17 +117,63 @@ def kb_confirm(game_id: str):
 
 
 def kb_back_to_menu():
-    """Клавиатура с одной кнопкой «Назад» → раздел «Меню»."""
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
     return b.as_markup()
 
 
+# ─── T-Bank: формирование токена ───
+_TOKEN_EXCLUDE_KEYS = frozenset({"Token", "DATA", "Receipt", "Shops", "Items"})
+
+
+def sign_payload(payload: dict, secret: str) -> str:
+    data = {
+        k: v for k, v in payload.items()
+        if k not in _TOKEN_EXCLUDE_KEYS and v is not None
+    }
+    data["Password"] = secret
+    sorted_keys = sorted(data.keys())
+    concatenated = "".join(str(data[k]) for k in sorted_keys)
+    return hashlib.sha256(concatenated.encode("utf-8")).hexdigest()
+
+
+# ─── T-Bank: проверка статуса платежа ───
+async def tbank_get_state(payment_id: str) -> str | None:
+    """
+    Возвращает статус платежа:
+      "CONFIRMED"  — оплачен
+      "NEW" / "AUTHORIZED" / "WAITING" / "FORM_SHOWED" — ожидает
+      "REJECTED" / "CANCELED" / "DEADLINE_EXPIRED" — отклонён
+      None — ошибка запроса
+    """
+    payload = {
+        "TerminalKey": TBANK_TERMINAL_KEY,
+        "PaymentId": str(payment_id),
+    }
+    token = sign_payload(payload, TBANK_PASSWORD)
+    payload["Token"] = token
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{TBANK_API_URL}/GetState", json=payload) as resp:
+            try:
+                data = await resp.json()
+            except Exception as e:
+                logger.error(f"Не удалось распарсить JSON от T-Bank GetState: {e}")
+                return None
+
+            if not data.get("Success"):
+                logger.error(f"T-Bank GetState error: {data}")
+                return None
+
+            return data.get("Status")
+
+
 # ─── Фоновая задача: проверка статуса платежей ───
 async def check_payments_loop():
     """
-    Каждые 15 секунд опрашивает VPS-бэкенд о статусе ожидающих платежей.
+    Каждые 15 секунд опрашивает T-Bank GetState напрямую.
     Если платёж подтверждён — отправляет уведомление пользователю.
     Если прошло больше 10 минут — удаляет сообщение со ссылкой и присылает сообщение о таймауте.
     """
@@ -134,13 +188,11 @@ async def check_payments_loop():
                 # ── Проверка таймаута (10 минут) ──
                 if now - info["created_at"] > 600:
                     logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
-                    # Удаляем сообщение со ссылкой на оплату
                     try:
                         await bot.delete_message(info["chat_id"], info["message_id"])
                     except Exception as e:
                         logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
 
-                    # Отправляем сообщение о таймауте
                     await bot.send_message(
                         info["chat_id"],
                         "Похоже, платёж прервался. Ничего страшного — "
@@ -150,32 +202,30 @@ async def check_payments_loop():
                     to_remove.append(order_id)
                     continue
 
-                # ── Запрос статуса платежа к VPS-бэкенду ──
-                paid = False
+                # ── Запрос статуса напрямую к T-Bank ──
+                payment_id = info.get("payment_id")
+                if not payment_id:
+                    logger.error(f"Нет payment_id для заказа {order_id}, пропуск")
+                    to_remove.append(order_id)
+                    continue
+
                 try:
-                    timeout = aiohttp.ClientTimeout(total=10)
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        async with session.post(
-                            f"{VPS_API_URL}/check-payment",
-                            json={
-                                "secret": API_SECRET,
-                                "order_id": order_id,
-                            },
-                        ) as resp:
-                            data = await resp.json()
-                            paid = bool(data.get("paid", False))
+                    status = await tbank_get_state(payment_id)
                 except Exception as e:
-                    logger.error(f"Ошибка запроса статуса платежа {order_id}: {e}")
-                    continue  # не удаляем, попробуем в следующий раз
+                    logger.error(f"Ошибка запроса статуса платежа {order_id} (payment_id={payment_id}): {e}")
+                    continue
+
+                if status is None:
+                    continue
 
                 # ── Платёж подтверждён ──
-                if paid:
-                    logger.info(f"Платёж {order_id} подтверждён — оплата выполнена")
+                if status == "CONFIRMED":
+                    logger.info(f"Платёж {order_id} подтверждён (T-Bank GetState: CONFIRMED)")
 
                     # 1) Отправляем «Оплата выполнена»
                     notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
 
-                    # 2) Небольшая пауза, чтобы пользователь увидел сообщение
+                    # 2) Пауза, чтобы пользователь увидел сообщение
                     await asyncio.sleep(2)
 
                     # 3) Удаляем сообщение «Оплата выполнена»
@@ -198,7 +248,6 @@ async def check_payments_loop():
                             reply_markup=kb_back_to_menu(),
                         )
                     else:
-                        # Если в названии нет UC — просто кнопка «Назад»
                         await bot.send_message(
                             info["chat_id"],
                             "Оплата успешно выполнена.",
@@ -207,12 +256,18 @@ async def check_payments_loop():
 
                     to_remove.append(order_id)
 
+                # ── Платёж отклонён / отменён ──
+                elif status in ("REJECTED", "CANCELED", "DEADLINE_EXPIRED"):
+                    logger.info(f"Платёж {order_id} отклонён (T-Bank GetState: {status})")
+                    # Просто удаляем из очереди, ничего не отправляем —
+                    # пользователь сам увидит в окне оплаты, что платёж не прошёл
+                    to_remove.append(order_id)
+
             except Exception as e:
                 logger.error(f"Непредвиденная ошибка при обработке платежа {order_id}: {e}")
                 logger.error(traceback.format_exc())
                 continue
 
-        # Чистим завершённые/истёкшие платежи
         for order_id in to_remove:
             pending_payments.pop(order_id, None)
 
@@ -406,7 +461,8 @@ async def cb_confirm_yes(callback, state: FSMContext):
             return
 
         pay_url = data["payment_url"]
-        logger.info(f"Платёж создан: payment_url={pay_url}")
+        payment_id = data.get("payment_id", "")
+        logger.info(f"Платёж создан: payment_id={payment_id}, payment_url={pay_url}")
 
     except aiohttp.ClientConnectorError as e:
         logger.error(f"Не удалось подключиться к VPS-бэкенду: {e}")
@@ -456,11 +512,12 @@ async def cb_confirm_yes(callback, state: FSMContext):
         "message_id": payment_msg.message_id,
         "game_id": game_id,
         "product_name": "60 UC",
+        "payment_id": payment_id,
         "amount_kopecks": amount_kopecks,
         "created_at": time.time(),
         "payment_url": pay_url,
     }
-    logger.info(f"Платёж {order_id} добавлен в очередь мониторинга")
+    logger.info(f"Платёж {order_id} (payment_id={payment_id}) добавлен в очередь мониторинга")
 
     await callback.answer()
 
@@ -487,14 +544,13 @@ async def cb_confirm_cancel(callback, state: FSMContext):
 async def on_error(event, exception):
     logger.error(f"Необработанная ошибка в хендлере: {exception}")
     logger.error(traceback.format_exc())
-    return True  # подавляем ошибку, бот не падает
+    return True
 
 
 # ─── Main ───
 async def main():
     logger.info("BotHost бот запущен")
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
-    # Запускаем фоновый мониторинг платежей
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
 
