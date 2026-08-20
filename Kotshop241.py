@@ -119,7 +119,7 @@ def _update_fazer_order_id_sync(payment_id, fazer_order_id):
 def _get_delivering_orders_sync():
     conn = _db_connect()
     rows = conn.execute(
-        "SELECT * FROM orders WHERE status = 'success' AND fazer_order_id IS NOT NULL"
+        "SELECT * FROM orders WHERE status = 'delivering' AND fazer_order_id IS NOT NULL"
     ).fetchall()
     conn.close()
     return rows
@@ -194,11 +194,19 @@ async def create_payment(user_id: int, order_id: str, amount_kopecks: int, descr
         try:
             async with session.post(f"{VPS_API_URL}/pay/init", json=payload) as resp:
                 data = await resp.json()
+                print(f"[DEBUG] VPS /pay/init response: {data}")
                 if data.get("success"):
-                    return {
-                        "payment_id": str(data["data"]["PaymentId"]),
-                        "payment_url": data["data"]["PaymentURL"],
-                    }
+                    d = data["data"]
+                    payment_id = str(d.get("OrderId") or d.get("PaymentId") or "")
+                    payment_url = d.get("PaymentURL", "")
+                    if payment_id and payment_url:
+                        return {
+                            "payment_id": payment_id,
+                            "payment_url": payment_url,
+                        }
+                    else:
+                        print(f"[ERROR] Нет OrderId/PaymentId или PaymentURL: {d}")
+                        return None
                 else:
                     print("VPS /pay/init error:", data)
                     return None
@@ -217,7 +225,14 @@ async def check_payment_state(payment_id: str) -> str | None:
             async with session.post(f"{VPS_API_URL}/pay/state", json=payload) as resp:
                 data = await resp.json()
                 if data.get("success"):
-                    return data["data"]["status"]
+                    raw = data["data"]["status"]
+                    if raw in ("NEW", "AUTHORIZED", "WAITING"):
+                        return "WAITING"
+                    elif raw == "CONFIRMED":
+                        return "SUCCESS"
+                    elif raw in ("REJECTED", "CANCELED", "DEADLINE_EXPIRED"):
+                        return "REJECTED"
+                    return "WAITING"
                 else:
                     print("VPS /pay/state error:", data)
                     return None
@@ -300,6 +315,7 @@ async def deliver_item(order_id: str, user_id: int, game_id: str, bot: Bot, paym
         await update_fazer_order_id(payment_id, fazer_order_id)
 
     if fazer_status == "completed":
+        await update_order_status(payment_id, "delivered")
         try:
             await bot.send_message(
                 user_id,
@@ -310,6 +326,7 @@ async def deliver_item(order_id: str, user_id: int, game_id: str, bot: Bot, paym
         except Exception as e:
             print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
     elif fazer_status == "processing":
+        await update_order_status(payment_id, "delivering")
         try:
             await bot.send_message(
                 user_id,
@@ -321,6 +338,7 @@ async def deliver_item(order_id: str, user_id: int, game_id: str, bot: Bot, paym
         except Exception as e:
             print(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
     else:
+        await update_order_status(payment_id, "delivering")
         try:
             await bot.send_message(
                 user_id,
