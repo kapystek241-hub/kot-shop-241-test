@@ -1,6 +1,8 @@
 # bothost_bot.py — запускается на BotHost
 import asyncio
 import os
+import logging
+import traceback
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -12,12 +14,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ─── Логирование ───
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("kotshop-bot")
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VPS_API_URL = os.getenv("VPS_API_URL")  # например: http://123.45.67.89:8080
 API_SECRET = os.getenv("API_SECRET", "change-me")
 
 if not all([BOT_TOKEN, VPS_API_URL]):
     raise ValueError("Не заданы переменные окружения: BOT_TOKEN, VPS_API_URL")
+
+logger.info(f"VPS_API_URL = {VPS_API_URL}")
+logger.info(f"API_SECRET задан: {'да' if API_SECRET != 'change-me' else 'НЕТ (значение по умолчанию!)'}")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -92,6 +105,7 @@ def kb_confirm(game_id: str):
 # ─── Хендлеры ───
 @dp.message(Command("start"))
 async def cmd_start(message):
+    logger.info(f"/start от user_id={message.from_user.id}, username={message.from_user.username}")
     await message.answer(WELCOME_TEXT, reply_markup=kb_start())
 
 
@@ -210,12 +224,14 @@ async def process_game_id(message, state: FSMContext):
     game_id = message.text.strip()
 
     if not game_id.isdigit() or not game_id.startswith("5"):
+        logger.warning(f"Неверный game_id от user_id={message.from_user.id}: '{game_id}'")
         await message.answer(
             "❌ ID должен состоять только из цифр и начинаться на 5. Попробуйте ещё раз."
         )
         return
 
     await state.clear()
+    logger.info(f"Получен game_id={game_id} от user_id={message.from_user.id}")
     await message.answer(
         f"Вы выбрали товар 60 UC стоимостью в 79 рублей\n"
         f"Ваш ID: {game_id}",
@@ -230,6 +246,8 @@ async def cb_confirm_yes(callback, state: FSMContext):
     user_id = callback.from_user.id
     order_id = f"order-{user_id}-{int(asyncio.get_event_loop().time())}"
     amount_kopecks = 7900
+
+    logger.info(f"Создание платежа: order_id={order_id}, user_id={user_id}, game_id={game_id}, amount={amount_kopecks}")
 
     # Запрос к VPS-бэкенду на создание платежа
     try:
@@ -247,23 +265,58 @@ async def cb_confirm_yes(callback, state: FSMContext):
                     "email": "noreply@kotshop241.ru",
                 }
             ) as resp:
-                data = await resp.json()
+                logger.info(f"Ответ бэкенда: HTTP {resp.status}")
+                try:
+                    data = await resp.json()
+                except Exception as e:
+                    raw_text = await resp.text()
+                    logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
+                    logger.error(f"Сырой ответ: {raw_text[:500]}")
+                    await callback.message.edit_text(
+                        "Сервер вернул некорректный ответ. Попробуйте позже."
+                    )
+                    await callback.answer()
+                    return
+
+        logger.info(f"Тело ответа бэкенда: {data}")
 
         if not data.get("success"):
             err = data.get("error", "неизвестная ошибка")
-            print(f"Ошибка создания платежа: {data}")
+            logger.error(f"Бэкенд отклонил платёж: {data}")
             await callback.message.edit_text(
-                f"Не удалось создать платёж: {err}. Попробуйте позже."
+                f"❌ Не удалось создать платёж: {err}\n\n"
+                f"Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
             )
             await callback.answer()
             return
 
         pay_url = data["payment_url"]
+        logger.info(f"Платёж создан: payment_url={pay_url}")
+
+    except aiohttp.ClientConnectorError as e:
+        logger.error(f"Не удалось подключиться к VPS-бэкенду: {e}")
+        logger.error(f"Проверьте VPS_API_URL={VPS_API_URL} и открыт ли порт 8080 на VPS")
+        await callback.message.edit_text(
+            "❌ Не удалось подключиться к серверу оплаты.\n"
+            "Проверьте, что VPS запущен и порт 8080 открыт.\n\n"
+            "Поддержка: @kotshop241_support"
+        )
+        await callback.answer()
+        return
+
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при запросе к VPS-бэкенду (15 сек). URL: {VPS_API_URL}")
+        await callback.message.edit_text(
+            "❌ Сервер оплаты не ответил вовремя. Попробуйте позже."
+        )
+        await callback.answer()
+        return
 
     except Exception as e:
-        print(f"Ошибка запроса к VPS: {e}")
+        logger.error(f"Непредвиденная ошибка при создании платежа: {e}")
+        logger.error(traceback.format_exc())
         await callback.message.edit_text(
-            "Сервер временно недоступен. Попробуйте позже."
+            "❌ Произошла ошибка. Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
         )
         await callback.answer()
         return
@@ -300,9 +353,18 @@ async def cb_confirm_cancel(callback, state: FSMContext):
     await callback.answer()
 
 
+# ─── Глобальный обработчик ошибок ───
+@dp.error()
+async def on_error(event, exception):
+    logger.error(f"Необработанная ошибка в хендлере: {exception}")
+    logger.error(traceback.format_exc())
+    return True  # подавляем ошибку, бот не падает
+
+
 # ─── Main ───
 async def main():
-    print("BotHost бот запущен")
+    logger.info("BotHost бот запущен")
+    logger.info(f"VPS_API_URL = {VPS_API_URL}")
     await dp.start_polling(bot)
 
 
