@@ -3,6 +3,7 @@ import asyncio
 import os
 import logging
 import traceback
+import time
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -47,6 +48,11 @@ WELCOME_TEXT = (
     "и даём возможность быстро и с гарантией пополнить любой сервис из нашего каталога. "
     "Также помогаем находить недоступные игры в Steam для пользователей из РФ."
 )
+
+
+# ─── Хранилище ожидающих платежей ───
+# Ключ — order_id, значение — dict с информацией о заказе
+pending_payments: dict[str, dict] = {}
 
 
 # ─── Клавиатуры ───
@@ -100,6 +106,115 @@ def kb_confirm(game_id: str):
     b.button(text="Я передумал", callback_data="confirm_cancel")
     b.adjust(1)
     return b.as_markup()
+
+
+def kb_back_to_menu():
+    """Клавиатура с одной кнопкой «Назад» → раздел «Меню»."""
+    b = InlineKeyboardBuilder()
+    b.button(text="Назад", callback_data="back_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
+# ─── Фоновая задача: проверка статуса платежей ───
+async def check_payments_loop():
+    """
+    Каждые 15 секунд опрашивает VPS-бэкенд о статусе ожидающих платежей.
+    Если платёж подтверждён — отправляет уведомление пользователю.
+    Если прошло больше 10 минут — удаляет сообщение со ссылкой и присылает сообщение о таймауте.
+    """
+    logger.info("Запущен цикл проверки платежей (интервал 15 сек, таймаут 600 сек)")
+    while True:
+        await asyncio.sleep(15)
+        now = time.time()
+        to_remove = []
+
+        for order_id, info in list(pending_payments.items()):
+            try:
+                # ── Проверка таймаута (10 минут) ──
+                if now - info["created_at"] > 600:
+                    logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
+                    # Удаляем сообщение со ссылкой на оплату
+                    try:
+                        await bot.delete_message(info["chat_id"], info["message_id"])
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
+
+                    # Отправляем сообщение о таймауте
+                    await bot.send_message(
+                        info["chat_id"],
+                        "Похоже, платёж прервался. Ничего страшного — "
+                        "просто создайте заказ ещё раз, и сможете оплатить.",
+                        reply_markup=kb_back_to_menu(),
+                    )
+                    to_remove.append(order_id)
+                    continue
+
+                # ── Запрос статуса платежа к VPS-бэкенду ──
+                paid = False
+                try:
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            f"{VPS_API_URL}/check-payment",
+                            json={
+                                "secret": API_SECRET,
+                                "order_id": order_id,
+                            },
+                        ) as resp:
+                            data = await resp.json()
+                            paid = bool(data.get("paid", False))
+                except Exception as e:
+                    logger.error(f"Ошибка запроса статуса платежа {order_id}: {e}")
+                    continue  # не удаляем, попробуем в следующий раз
+
+                # ── Платёж подтверждён ──
+                if paid:
+                    logger.info(f"Платёж {order_id} подтверждён — оплата выполнена")
+
+                    # 1) Отправляем «Оплата выполнена»
+                    notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
+
+                    # 2) Небольшая пауза, чтобы пользователь увидел сообщение
+                    await asyncio.sleep(2)
+
+                    # 3) Удаляем сообщение «Оплата выполнена»
+                    try:
+                        await notify_msg.delete()
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
+
+                    # 4) Удаляем сообщение со ссылкой на оплату
+                    try:
+                        await bot.delete_message(info["chat_id"], info["message_id"])
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
+
+                    # 5) Проверяем название товара на наличие «UC»
+                    if "UC" in info.get("product_name", ""):
+                        await bot.send_message(
+                            info["chat_id"],
+                            "UC поступят на аккаунт в течении 5 минут",
+                            reply_markup=kb_back_to_menu(),
+                        )
+                    else:
+                        # Если в названии нет UC — просто кнопка «Назад»
+                        await bot.send_message(
+                            info["chat_id"],
+                            "Оплата успешно выполнена.",
+                            reply_markup=kb_back_to_menu(),
+                        )
+
+                    to_remove.append(order_id)
+
+            except Exception as e:
+                logger.error(f"Непредвиденная ошибка при обработке платежа {order_id}: {e}")
+                logger.error(traceback.format_exc())
+                continue
+
+        # Чистим завершённые/истёкшие платежи
+        for order_id in to_remove:
+            pending_payments.pop(order_id, None)
 
 
 # ─── Хендлеры ───
@@ -244,7 +359,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
     await state.clear()
     game_id = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    order_id = f"order-{user_id}-{int(asyncio.get_event_loop().time())}"
+    order_id = f"order-{user_id}-{int(time.time())}"
     amount_kopecks = 7900
 
     logger.info(f"Создание платежа: order_id={order_id}, user_id={user_id}, game_id={game_id}, amount={amount_kopecks}")
@@ -325,7 +440,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
     b.button(text="Оплатить 79 ₽", url=pay_url)
     b.adjust(1)
 
-    await callback.message.edit_text(
+    payment_msg = await callback.message.edit_text(
         f"Заказ #{order_id}\n"
         f"Товар: 60 UC\n"
         f"Ваш ID: {game_id}\n"
@@ -333,6 +448,20 @@ async def cb_confirm_yes(callback, state: FSMContext):
         f"Нажмите «Оплатить», чтобы завершить покупку.",
         reply_markup=b.as_markup()
     )
+
+    # ── Сохраняем информацию о платеже для фонового мониторинга ──
+    pending_payments[order_id] = {
+        "user_id": user_id,
+        "chat_id": callback.message.chat.id,
+        "message_id": payment_msg.message_id,
+        "game_id": game_id,
+        "product_name": "60 UC",
+        "amount_kopecks": amount_kopecks,
+        "created_at": time.time(),
+        "payment_url": pay_url,
+    }
+    logger.info(f"Платёж {order_id} добавлен в очередь мониторинга")
+
     await callback.answer()
 
 
@@ -365,6 +494,8 @@ async def on_error(event, exception):
 async def main():
     logger.info("BotHost бот запущен")
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
+    # Запускаем фоновый мониторинг платежей
+    asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
 
 
