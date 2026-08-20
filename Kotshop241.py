@@ -145,11 +145,11 @@ async def get_game_id(user_id: int) -> str | None:
 
 
 # --- Обращение к VPS для создания платежа ---
-async def create_payment(order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
+async def create_payment(user_id: int, order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
     """Создаёт платёж через VPS (FastAPI), который сам обращается к Т-Банку."""
     amount_rub = amount_kopecks / 100
     payload = {
-        "user_id": 0,
+        "user_id": user_id,
         "amount": amount_rub,
         "order_id": order_id,
         "description": description or f"Покупка игровой валюты: {order_id}"
@@ -455,6 +455,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
     amount_kopecks = 7900  # 79 рублей
 
     result = await create_payment(
+        user_id,
         order_id,
         amount_kopecks,
         description=f"Покупка 60 UC для PUBG Mobile. Игровой ID: {game_id}"
