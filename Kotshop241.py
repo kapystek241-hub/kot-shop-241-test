@@ -1,30 +1,27 @@
 import asyncio
 import os
-import hashlib
-import hmac
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from dotenv import load_dotenv
 
-load_dotenv()
+# Явно указываем путь к .env рядом со скриптом
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(_env_path)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TBANK_TERMINAL_KEY = os.getenv("TBANK_TERMINAL_KEY")
-TBANK_PASSWORD = os.getenv("TBANK_PASSWORD")
 DB_PATH = os.getenv("DB_PATH", "kotshop.db")
+VPS_API_URL = os.getenv("VPS_API_URL", "http://157.22.252.246:8000")
 
-if not all([BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_PASSWORD]):
-    raise ValueError("Не заданы переменные окружения: BOT_TOKEN, TBANK_TERMINAL_KEY, TBANK_PASSWORD")
-
-API_URL = "https://securepay.tinkoff.ru/v2"  # продакшн
+if not BOT_TOKEN:
+    raise ValueError("Не задана переменная окружения: BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -146,76 +143,53 @@ async def get_game_id(user_id: int) -> str | None:
     return await asyncio.to_thread(_get_game_id_sync, user_id)
 
 
-# --- Подпись для Т‑Банка ---
-def sign_payload(payload: dict, secret: str) -> str:
-    keys = sorted(k for k in payload.keys() if payload[k] is not None)
-    pairs = [f"{k}={payload[k]}" for k in keys]
-    base_string = "&".join(pairs)
-    return hmac.new(
-        secret.encode("utf-8"),
-        base_string.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-
+# --- Обращение к VPS для создания платежа ---
 async def create_payment(order_id: str, amount_kopecks: int, description: str = None) -> dict | None:
+    """Создаёт платёж через VPS (FastAPI), который сам обращается к Т-Банку."""
+    amount_rub = amount_kopecks / 100
     payload = {
-        "TerminalKey": TBANK_TERMINAL_KEY,
-        "Amount": amount_kopecks,
-        "OrderId": order_id,
-        "Description": description or f"Покупка игровой валюты: {order_id}",
+        "user_id": 0,
+        "amount": amount_rub,
+        "order_id": order_id,
+        "description": description or f"Покупка игровой валюты: {order_id}"
     }
-    token = sign_payload(payload, TBANK_PASSWORD)
-    payload["Token"] = token
 
-    timeout = aiohttp.ClientTimeout(total=10)
+    timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{API_URL}/Init", json=payload) as resp:
-            try:
+        try:
+            async with session.post(f"{VPS_API_URL}/pay/init", json=payload) as resp:
                 data = await resp.json()
-            except Exception:
-                print("Ошибка парсинга JSON от Т‑Банка")
-                return None
+                if data.get("success"):
+                    return {
+                        "payment_id": str(data["data"]["OrderId"]),
+                        "payment_url": data["data"]["PaymentURL"],
+                    }
+                else:
+                    print("VPS /pay/init error:", data)
+                    return None
+        except Exception as e:
+            print(f"Ошибка связи с VPS при Init: {e}")
+            return None
 
-            if data.get("Success") is True and "PaymentId" in data and "PaymentURL" in data:
-                return {
-                    "payment_id": data["PaymentId"],
-                    "payment_url": data["PaymentURL"],
-                }
-            else:
-                print("Init error:", data)
-                return None
 
-
+# --- Обращение к VPS для проверки статуса ---
 async def check_payment_state(payment_id: str) -> str | None:
-    payload = {
-        "TerminalKey": TBANK_TERMINAL_KEY,
-        "PaymentId": payment_id,
-    }
-    token = sign_payload(payload, TBANK_PASSWORD)
-    payload["Token"] = token
+    """Проверяет статус платежа через VPS (FastAPI)."""
+    payload = {"payment_id": payment_id}
 
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{API_URL}/GetState", json=payload) as resp:
-            try:
+        try:
+            async with session.post(f"{VPS_API_URL}/pay/state", json=payload) as resp:
                 data = await resp.json()
-            except Exception:
-                print("Ошибка парсинга JSON при GetState")
-                return None
-
-            if not data.get("Success"):
-                print("GetState error:", data)
-                return None
-
-            status = data.get("Status")
-            if status == "WAITING":
-                return "WAITING"
-            elif status == "CONFIRMED":
-                return "SUCCESS"
-            elif status in ("REJECTED", "CANCELED"):
-                return "REJECTED"
-            return status
+                if data.get("success"):
+                    return data["data"]["status"]
+                else:
+                    print("VPS /pay/state error:", data)
+                    return None
+        except Exception as e:
+            print(f"Ошибка связи с VPS при GetState: {e}")
+            return None
 
 
 # --- Логика выдачи товара (заглушка) ---
