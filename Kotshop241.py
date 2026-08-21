@@ -8,7 +8,7 @@ import time
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -27,12 +27,14 @@ logger = logging.getLogger("kotshop-bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VPS_API_URL = os.getenv("VPS_API_URL")  # например: http://123.45.67.89:8080
 API_SECRET = os.getenv("API_SECRET", "change-me")
+REVIEW_CHAT_ID = os.getenv("REVIEW_CHAT_ID", "")
 
 if not all([BOT_TOKEN, VPS_API_URL]):
     raise ValueError("Не заданы переменные окружения: BOT_TOKEN, VPS_API_URL")
 
 logger.info(f"VPS_API_URL = {VPS_API_URL}")
 logger.info(f"API_SECRET задан: {'да' if API_SECRET != 'change-me' else 'НЕТ (значение по умолчанию!)'}")
+logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'}")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -48,6 +50,8 @@ PRODUCTS = {
 # ─── FSM ───
 class OrderFlow(StatesGroup):
     waiting_for_id = State()
+    waiting_for_rating = State()
+    waiting_for_review_text = State()
 
 
 # ─── Тексты ───
@@ -87,10 +91,44 @@ POLICY_TEXT = (
     "магазина и положениями оферты, обязательными для ознакомления перед совершением покупки."
 )
 
+SUPPORT_TEXT = (
+    "Поддержка отвечает в течение 24 часов. Пожалуйста, не дублируйте сообщения — "
+    "вместо этого следуйте инструкции ниже.\n\n"
+    "1) Если бот не отправил товар, перешлите переписку с ботом в чат поддержки.\n"
+    "2) Дождитесь ответа. Если подтвердится, что товар не был отправлен на указанный "
+    "вами способ доставки, средства вернут.\n"
+    "3) Не нервничайте и не ищите виноватых — просто опишите, что произошло, и укажите "
+    "причину, которую вам назвали.\n"
+    "4) Объясните ситуацию развёрнуто: что заказывали, когда, каким способом должны были "
+    "получить товар и что ответил бот."
+)
+
+REVIEW_PROMPT_TEXT = (
+    "Оплата прошла успешно, спасибо! 🎉 "
+    "Если вам понравился сервис, будем рады вашему отзыву — он помогает нам становиться лучше.💙"
+)
+
+REVIEW_RATING_TEXT = (
+    "Каждый отзыв — от реального покупателя, который уже получил товар, "
+    "и для меня это очень ценно 💛\n\n"
+    "Пожалуйста, перед тем как написать отзыв, оцените качество сервиса "
+    "от 1 до 10. Просто отправьте число — это поможет мне стать лучше! 🙏"
+)
+
+REVIEW_WRITE_TEXT = (
+    "Вы можете написать о нашем сервисе всё, что думаете — даже если "
+    "хочется позлиться, мы готовы выслушать 🤬 В любом случае каждое "
+    "сообщение помогает нам стать лучше, и мы благодарны за любую "
+    "обратную связь! 💬"
+)
+
+DELIVERY_TEXT = "UC были доставлены на ваш аккаунт ✅"
+
 
 # ─── Файл для сохранения ожидающих платежей ───
 PENDING_FILE = os.getenv("PENDING_FILE", "pending_payments.json")
 PAYMENT_TIMEOUT = 600
+DELIVERY_TIMEOUT = 1800
 STARTUP_LOAD_WINDOW = 900
 
 pending_payments: dict[str, dict] = {}
@@ -200,6 +238,31 @@ def kb_policy():
     return b.as_markup()
 
 
+def kb_support():
+    b = InlineKeyboardBuilder()
+    b.button(text="Поддержка", url="https://t.me/KotShop2415")
+    b.button(text="Назад", callback_data="back_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_review():
+    b = InlineKeyboardBuilder()
+    b.button(text="Оценить", callback_data="review_start")
+    b.button(text="В меню", callback_data="menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def kb_review_rating():
+    b = InlineKeyboardBuilder()
+    b.button(text="Написать отзыв", callback_data="review_write")
+    b.button(text="Отправить без текста", callback_data="review_send_stars_only")
+    b.button(text="Отменить", callback_data="review_cancel")
+    b.adjust(1)
+    return b.as_markup()
+
+
 # ─── Запрос статуса платежа к VPS ───
 async def vps_check_payment(order_id: str) -> bool | None:
     try:
@@ -223,71 +286,135 @@ async def vps_check_payment(order_id: str) -> bool | None:
         return None
 
 
-# ─── Фоновая задача: проверка статуса платежей ───
+# ─── Запрос статуса доставки к VPS ───
+async def vps_check_delivery(order_id: str) -> bool | None:
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{VPS_API_URL}/check-delivery",
+                json={
+                    "secret": API_SECRET,
+                    "order_id": order_id,
+                },
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.error(f"VPS /check-delivery вернул HTTP {resp.status}: {text[:200]}")
+                    return None
+                data = await resp.json()
+                return bool(data.get("delivered", False))
+    except Exception as e:
+        logger.error(f"Ошибка запроса статуса доставки {order_id} к VPS: {e}")
+        return None
+
+
+# ─── Отправка отзыва в группу ───
+async def send_review_to_group(text: str):
+    if not REVIEW_CHAT_ID:
+        logger.warning("REVIEW_CHAT_ID не задан — отзыв не отправлен в группу")
+        return
+    try:
+        await bot.send_message(REVIEW_CHAT_ID, text)
+        logger.info("Отзыв отправлен в группу отзывов")
+    except Exception as e:
+        logger.error(f"Не удалось отправить отзыв в группу: {e}")
+
+
+# ─── Фоновая задача: проверка статуса платежей и доставки ───
 async def check_payments_loop():
     logger.info("Запущен цикл проверки платежей (интервал 15 сек, таймаут 600 сек)")
     while True:
         await asyncio.sleep(15)
         now = time.time()
         to_remove = []
+        status_changed = False
 
         for order_id, info in list(pending_payments.items()):
             try:
-                if now - info["created_at"] > PAYMENT_TIMEOUT:
-                    logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
-                    await bot.send_message(
-                        info["chat_id"],
-                        "Похоже, платёж прервался. Ничего страшного — "
-                        "просто создайте заказ ещё раз, и сможете оплатить.",
-                        reply_markup=kb_back_to_menu(),
-                    )
+                status = info.get("status", "paying")
+
+                # ── Проверка оплаты ──
+                if status == "paying":
+                    if now - info["created_at"] > PAYMENT_TIMEOUT:
+                        logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
+                        await bot.send_message(
+                            info["chat_id"],
+                            "Похоже, платёж прервался. Ничего страшного — "
+                            "просто создайте заказ ещё раз, и сможете оплатить.",
+                            reply_markup=kb_back_to_menu(),
+                        )
+                        await asyncio.sleep(1)
+                        try:
+                            await bot.delete_message(info["chat_id"], info["message_id"])
+                        except Exception as e:
+                            logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
+                        to_remove.append(order_id)
+                        continue
+
+                    paid = await vps_check_payment(order_id)
+                    if paid is None or not paid:
+                        continue
+
+                    logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
+
+                    notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
+                    await asyncio.sleep(2)
+                    try:
+                        await notify_msg.delete()
+                    except Exception as e:
+                        logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
+
                     await asyncio.sleep(1)
                     try:
                         await bot.delete_message(info["chat_id"], info["message_id"])
                     except Exception as e:
-                        logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
+                        logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
 
+                    if "UC" in info.get("product_name", ""):
+                        # UC — переводим в режим проверки доставки
+                        await bot.send_message(
+                            info["chat_id"],
+                            "UC поступят на аккаунт в течении 5 минут",
+                            reply_markup=kb_back_to_menu(),
+                        )
+                        info["status"] = "delivering"
+                        info["paid_at"] = time.time()
+                        status_changed = True
+                        logger.info(f"Заказ {order_id} переведён в статус delivering")
+                    else:
+                        # Не UC — завершаем
+                        await bot.send_message(
+                            info["chat_id"],
+                            "Оплата успешно выполнена.",
+                            reply_markup=kb_back_to_menu(),
+                        )
+                        to_remove.append(order_id)
+
+                # ── Проверка доставки ──
+                elif status == "delivering":
+                    paid_at = info.get("paid_at", info["created_at"])
+                    if now - paid_at > DELIVERY_TIMEOUT:
+                        logger.info(f"Доставка {order_id} истекла по таймауту ({DELIVERY_TIMEOUT} сек)")
+                        await bot.send_message(
+                            info["chat_id"],
+                            DELIVERY_TEXT,
+                            reply_markup=kb_review(),
+                        )
+                        to_remove.append(order_id)
+                        continue
+
+                    delivered = await vps_check_delivery(order_id)
+                    if delivered is None or not delivered:
+                        continue
+
+                    logger.info(f"Доставка {order_id} подтверждена (VPS: delivered=true)")
+                    await bot.send_message(
+                        info["chat_id"],
+                        DELIVERY_TEXT,
+                        reply_markup=kb_review(),
+                    )
                     to_remove.append(order_id)
-                    continue
-
-                paid = await vps_check_payment(order_id)
-
-                if paid is None:
-                    continue
-
-                if not paid:
-                    continue
-
-                logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
-
-                notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
-                await asyncio.sleep(2)
-
-                try:
-                    await notify_msg.delete()
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
-
-                if "UC" in info.get("product_name", ""):
-                    await bot.send_message(
-                        info["chat_id"],
-                        "UC поступят на аккаунт в течении 5 минут",
-                        reply_markup=kb_back_to_menu(),
-                    )
-                else:
-                    await bot.send_message(
-                        info["chat_id"],
-                        "Оплата успешно выполнена.",
-                        reply_markup=kb_back_to_menu(),
-                    )
-
-                await asyncio.sleep(1)
-                try:
-                    await bot.delete_message(info["chat_id"], info["message_id"])
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
-
-                to_remove.append(order_id)
 
             except Exception as e:
                 logger.error(f"Непредвиденная ошибка при обработке платежа {order_id}: {e}")
@@ -297,6 +424,7 @@ async def check_payments_loop():
         if to_remove:
             for order_id in to_remove:
                 pending_payments.pop(order_id, None)
+        if to_remove or status_changed:
             save_pending_to_file()
 
 
@@ -317,6 +445,14 @@ async def cmd_start(message):
     await message.answer(WELCOME_TEXT, reply_markup=kb_start())
 
 
+# ── Раздел «Отзыв» (вызывается текстом «Отзыв») ──
+@dp.message(F.text == "Отзыв", StateFilter(None))
+async def cmd_review(message, state: FSMContext):
+    await state.clear()
+    await message.answer(REVIEW_PROMPT_TEXT, reply_markup=kb_review())
+
+
+# ── Меню и навигация ──
 @dp.callback_query(F.data == "menu")
 async def cb_menu(callback, state: FSMContext):
     await state.clear()
@@ -352,7 +488,7 @@ async def cb_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "support")
 async def cb_support(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Связь с поддержкой: @kotshop241_support", kb_menu())
+    await answer_and_delete(callback, SUPPORT_TEXT, kb_support())
     await callback.answer()
 
 
@@ -370,14 +506,11 @@ async def cb_back_menu(callback, state: FSMContext):
     await callback.answer()
 
 
+# ── PUBG Mobile ──
 @dp.callback_query(F.data == "pubg")
 async def cb_pubg(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(
-        callback,
-        "Выберите нужный раздел",
-        kb_pubg(),
-    )
+    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
     await callback.answer()
 
 
@@ -417,11 +550,7 @@ async def cb_pubg_other(callback, state: FSMContext):
 @dp.callback_query(F.data == "back_pubg")
 async def cb_back_pubg(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(
-        callback,
-        "Выберите нужный раздел",
-        kb_pubg(),
-    )
+    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
     await callback.answer()
 
 
@@ -571,9 +700,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
 
     except asyncio.TimeoutError:
         logger.error(f"Таймаут при запросе к VPS-бэкенду (15 сек). URL: {VPS_API_URL}")
-        await callback.message.answer(
-            "❌ Сервер оплаты не ответил вовремя. Попробуйте позже."
-        )
+        await callback.message.answer("❌ Сервер оплаты не ответил вовремя. Попробуйте позже.")
         await asyncio.sleep(1)
         try:
             await callback.message.delete()
@@ -627,10 +754,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
             f"Оплатите оба платежа, чтобы завершить покупку."
         )
 
-    payment_msg = await callback.message.answer(
-        payment_text,
-        reply_markup=b.as_markup()
-    )
+    payment_msg = await callback.message.answer(payment_text, reply_markup=b.as_markup())
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -649,6 +773,7 @@ async def cb_confirm_yes(callback, state: FSMContext):
             "amount_kopecks": amount_kopecks,
             "created_at": time.time(),
             "payment_url": order["pay_url"],
+            "status": "paying",
         }
     save_pending_to_file()
     logger.info(f"Добавлено {len(created_orders)} заказов в очередь мониторинга")
@@ -674,11 +799,87 @@ async def cb_confirm_noid(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(
-        callback,
-        "Выберите нужный раздел",
-        kb_pubg(),
+    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
+    await callback.answer()
+
+
+# ── Раздел отзывов ──
+@dp.callback_query(F.data == "review_start")
+async def cb_review_start(callback, state: FSMContext):
+    await state.set_state(OrderFlow.waiting_for_rating)
+    await callback.message.answer(REVIEW_RATING_TEXT)
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.message(OrderFlow.waiting_for_rating)
+async def process_rating(message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit() or not (1 <= int(text) <= 10):
+        await message.answer("❌ Пожалуйста, отправьте число от 1 до 10.")
+        return
+
+    rating = int(text)
+    stars = "⭐" * rating
+    await state.set_state(None)
+    await state.set_data({"rating": rating})
+    await message.answer(
+        f"{stars}\n\nЗдесь будет ваш отзыв, напишите его",
+        reply_markup=kb_review_rating()
     )
+
+
+@dp.callback_query(F.data == "review_write")
+async def cb_review_write(callback, state: FSMContext):
+    await state.set_state(OrderFlow.waiting_for_review_text)
+    await callback.message.answer(REVIEW_WRITE_TEXT)
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.message(OrderFlow.waiting_for_review_text)
+async def process_review_text(message, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("rating", 5)
+    stars = "⭐" * rating
+    review_text = message.text.strip()
+
+    full_review = f"{stars}\n\n{review_text}"
+    await send_review_to_group(full_review)
+
+    await state.clear()
+    await message.answer("Спасибо за ваш отзыв! 💙", reply_markup=kb_menu())
+
+
+@dp.callback_query(F.data == "review_send_stars_only")
+async def cb_review_send_stars_only(callback, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("rating", 5)
+    stars = "⭐" * rating
+
+    await send_review_to_group(stars)
+    await state.clear()
+    await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=kb_menu())
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "review_cancel")
+async def cb_review_cancel(callback, state: FSMContext):
+    await state.clear()
+    await answer_and_delete(callback, MENU_TEXT, kb_menu())
     await callback.answer()
 
 
@@ -694,6 +895,7 @@ async def on_error(event, exception):
 async def main():
     logger.info("BotHost бот запущен")
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
+    logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
     load_pending_from_file()
 
