@@ -263,6 +263,16 @@ def kb_review_rating():
     return b.as_markup()
 
 
+def kb_review_confirm():
+    b = InlineKeyboardBuilder()
+    b.button(text="Отправить", callback_data="review_send")
+    b.button(text="Изменить текст", callback_data="review_edit_text")
+    b.button(text="Поменять оценку", callback_data="review_change_rating")
+    b.button(text="В меню", callback_data="review_to_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+
 # ─── Запрос статуса платежа к VPS ───
 async def vps_check_payment(order_id: str) -> bool | None:
     try:
@@ -852,11 +862,74 @@ async def process_review_text(message, state: FSMContext):
     stars = "⭐" * rating
     review_text = message.text.strip()
 
+    await state.set_state(None)
+    await state.set_data({"rating": rating, "review_text": review_text})
+    await message.answer(
+        f"{stars}\n\n{review_text}",
+        reply_markup=kb_review_confirm()
+    )
+
+
+@dp.callback_query(F.data == "review_send")
+async def cb_review_send(callback, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("rating", 5)
+    review_text = data.get("review_text", "")
+    stars = "⭐" * rating
+
     full_review = f"{stars}\n\n{review_text}"
     await send_review_to_group(full_review)
 
     await state.clear()
-    await message.answer("Спасибо за ваш отзыв! 💙", reply_markup=kb_menu())
+    await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=kb_menu())
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "review_edit_text")
+async def cb_review_edit_text(callback, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("rating", 5)
+    await state.set_state(OrderFlow.waiting_for_review_text)
+    await state.set_data({"rating": rating})
+    await callback.message.answer(REVIEW_WRITE_TEXT)
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "review_change_rating")
+async def cb_review_change_rating(callback, state: FSMContext):
+    data = await state.get_data()
+    review_text = data.get("review_text", "")
+    await state.set_state(OrderFlow.waiting_for_rating)
+    await state.set_data({"review_text": review_text})
+    await callback.message.answer(REVIEW_RATING_TEXT)
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "review_to_menu")
+async def cb_review_to_menu(callback, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(MENU_TEXT, reply_markup=kb_menu())
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "review_send_stars_only")
