@@ -41,9 +41,11 @@ dp = Dispatcher()
 
 
 # ─── Каталог товаров ───
+# vps_orders — сколько заявок по 60 UC отправляется на VPS после оплаты
+# amount_kopecks — полная сумма одного платежа в копейках
 PRODUCTS = {
-    "60uc":  {"name": "60 UC",  "price": 82,  "amount_kopecks": 8200,  "orders": 1},
-    "120uc": {"name": "120 UC", "price": 164, "amount_kopecks": 8200,  "orders": 2},
+    "60uc":  {"name": "60 UC",  "price": 82,  "amount_kopecks": 8200,  "vps_orders": 1},
+    "120uc": {"name": "120 UC", "price": 164, "amount_kopecks": 16400, "vps_orders": 2},
 }
 
 
@@ -293,6 +295,38 @@ async def vps_check_payment(order_id: str) -> bool | None:
         return None
 
 
+# ─── Отправка заявки на доставку UC на VPS ───
+# Вызывается после подтверждения оплаты. Для 120 UC вызывается дважды.
+async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int) -> bool:
+    """
+    Отправляет заявку на доставку 60 UC на VPS.
+    deliver_index — номер заявки (1, 2, ...), нужен для логов и уникальности.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{VPS_API_URL}/deliver",
+                json={
+                    "secret": API_SECRET,
+                    "game_id": game_id,
+                    "user_id": user_id,
+                    "order_id": order_id,
+                    "deliver_index": deliver_index,
+                    "uc_amount": 60,
+                },
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.error(f"VPS /deliver #{deliver_index} вернул HTTP {resp.status}: {text[:200]}")
+                    return False
+                data = await resp.json()
+                return bool(data.get("success", False))
+    except Exception as e:
+        logger.error(f"Ошибка доставки UC (заявка #{deliver_index}) к VPS: {e}")
+        return False
+
+
 # ─── Отправка отзыва в группу ───
 async def send_review_to_group(text: str):
     if not REVIEW_CHAT_ID:
@@ -336,6 +370,20 @@ async def check_payments_loop():
                     continue
 
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
+
+                # ── Доставка UC на VPS (одна или несколько заявок по 60 UC) ──
+                vps_orders_count = info.get("vps_orders", 1)
+                game_id = info.get("game_id", "")
+                delivery_user_id = info.get("user_id", 0)
+
+                for i in range(vps_orders_count):
+                    success = await vps_deliver(game_id, delivery_user_id, order_id, i + 1)
+                    if success:
+                        logger.info(f"Доставка {i+1}/{vps_orders_count} для заказа {order_id} — успешно")
+                    else:
+                        logger.error(f"Доставка {i+1}/{vps_orders_count} для заказа {order_id} — НЕ удалась")
+                    if i < vps_orders_count - 1:
+                        await asyncio.sleep(2)
 
                 notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
                 await asyncio.sleep(2)
@@ -561,6 +609,7 @@ async def process_game_id(message, state: FSMContext):
     )
 
 
+# ── Подтверждение заказа → создание ОДНОГО платежа ──
 @dp.callback_query(F.data.startswith("confirm_yes"))
 async def cb_confirm_yes(callback, state: FSMContext):
     await state.clear()
@@ -569,61 +618,41 @@ async def cb_confirm_yes(callback, state: FSMContext):
     product_key = parts[2] if len(parts) > 2 else "60uc"
     product = PRODUCTS.get(product_key, PRODUCTS["60uc"])
     user_id = callback.from_user.id
-    num_orders = product["orders"]
     amount_kopecks = product["amount_kopecks"]
     total_price = product["price"]
+    vps_orders = product["vps_orders"]
 
     logger.info(
         f"Создание платежа: user_id={user_id}, game_id={game_id}, "
-        f"product={product_key}, orders={num_orders}, amount_per_order={amount_kopecks}"
+        f"product={product_key}, amount={amount_kopecks} коп., vps_orders={vps_orders}"
     )
 
-    created_orders = []
+    order_id = f"order-{user_id}-{int(time.time())}"
+    logger.info(f"Создание заказа: order_id={order_id}")
 
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for i in range(num_orders):
-                order_id = f"order-{user_id}-{int(time.time())}-{i+1}"
-                logger.info(f"Создание заказа {i+1}/{num_orders}: order_id={order_id}")
-
-                async with session.post(
-                    f"{VPS_API_URL}/create-payment",
-                    json={
-                        "secret": API_SECRET,
-                        "order_id": order_id,
-                        "amount_kopecks": amount_kopecks,
-                        "game_id": game_id,
-                        "user_id": user_id,
-                        "description": f"Покупка 60 UC для PUBG Mobile. Игровой ID: {game_id}",
-                        "email": "noreply@kotshop241.ru",
-                    }
-                ) as resp:
-                    logger.info(f"Ответ бэкенда (заказ {i+1}): HTTP {resp.status}")
-                    try:
-                        data = await resp.json()
-                    except Exception as e:
-                        raw_text = await resp.text()
-                        logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
-                        logger.error(f"Сырой ответ: {raw_text[:500]}")
-                        await callback.message.answer("Сервер вернул некорректный ответ. Попробуйте позже.")
-                        await asyncio.sleep(1)
-                        try:
-                            await callback.message.delete()
-                        except Exception:
-                            pass
-                        await callback.answer()
-                        return
-
-                logger.info(f"Тело ответа бэкенда (заказ {i+1}): {data}")
-
-                if not data.get("success"):
-                    err = data.get("error", "неизвестная ошибка")
-                    logger.error(f"Бэкенд отклонил платёж (заказ {i+1}): {data}")
-                    await callback.message.answer(
-                        f"❌ Не удалось создать платёж: {err}\n\n"
-                        f"Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
-                    )
+            async with session.post(
+                f"{VPS_API_URL}/create-payment",
+                json={
+                    "secret": API_SECRET,
+                    "order_id": order_id,
+                    "amount_kopecks": amount_kopecks,
+                    "game_id": game_id,
+                    "user_id": user_id,
+                    "description": f"Покупка {product['name']} для PUBG Mobile. Игровой ID: {game_id}",
+                    "email": "noreply@kotshop241.ru",
+                }
+            ) as resp:
+                logger.info(f"Ответ бэкенда: HTTP {resp.status}")
+                try:
+                    data = await resp.json()
+                except Exception as e:
+                    raw_text = await resp.text()
+                    logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
+                    logger.error(f"Сырой ответ: {raw_text[:500]}")
+                    await callback.message.answer("Сервер вернул некорректный ответ. Попробуйте позже.")
                     await asyncio.sleep(1)
                     try:
                         await callback.message.delete()
@@ -632,12 +661,22 @@ async def cb_confirm_yes(callback, state: FSMContext):
                     await callback.answer()
                     return
 
-                created_orders.append({
-                    "order_id": order_id,
-                    "pay_url": data["payment_url"],
-                    "payment_id": data.get("payment_id", ""),
-                })
-                logger.info(f"Заказ {i+1} создан: order_id={order_id}, payment_id={data.get('payment_id', '')}")
+        logger.info(f"Тело ответа бэкенда: {data}")
+
+        if not data.get("success"):
+            err = data.get("error", "неизвестная ошибка")
+            logger.error(f"Бэкенд отклонил платёж: {data}")
+            await callback.message.answer(
+                f"❌ Не удалось создать платёж: {err}\n\n"
+                f"Попробуйте позже или обратитесь в поддержку: @kotshop241_support"
+            )
+            await asyncio.sleep(1)
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.answer()
+            return
 
     except aiohttp.ClientConnectorError as e:
         logger.error(f"Не удалось подключиться к VPS-бэкенду: {e}")
@@ -680,36 +719,18 @@ async def cb_confirm_yes(callback, state: FSMContext):
         await callback.answer()
         return
 
-    # Клавиатура с кнопками оплаты
+    # Клавиатура с одной кнопкой оплаты
     b = InlineKeyboardBuilder()
-    if num_orders == 1:
-        b.button(text=f"Оплатить {total_price} ₽", url=created_orders[0]["pay_url"])
-    else:
-        for i, order in enumerate(created_orders):
-            b.button(
-                text=f"Оплатить {product['price'] // num_orders} ₽ ({i+1}/{num_orders})",
-                url=order["pay_url"],
-            )
+    b.button(text=f"Оплатить {total_price} ₽", url=data["payment_url"])
     b.adjust(1)
 
-    # Текст сообщения
-    if num_orders == 1:
-        payment_text = (
-            f"Заказ #{created_orders[0]['order_id']}\n"
-            f"Товар: {product['name']}\n"
-            f"Ваш ID: {game_id}\n"
-            f"Сумма: {total_price} ₽\n\n"
-            f"Нажмите «Оплатить», чтобы завершить покупку."
-        )
-    else:
-        order_ids = ", ".join(f"#{o['order_id']}" for o in created_orders)
-        payment_text = (
-            f"Заказы: {order_ids}\n"
-            f"Товар: {product['name']}\n"
-            f"Ваш ID: {game_id}\n"
-            f"Сумма: {total_price} ₽ ({num_orders} платежа по {product['price'] // num_orders} ₽)\n\n"
-            f"Оплатите оба платежа, чтобы завершить покупку."
-        )
+    payment_text = (
+        f"Заказ #{order_id}\n"
+        f"Товар: {product['name']}\n"
+        f"Ваш ID: {game_id}\n"
+        f"Сумма: {total_price} ₽\n\n"
+        f"Нажмите «Оплатить», чтобы завершить покупку."
+    )
 
     payment_msg = await callback.message.answer(payment_text, reply_markup=b.as_markup())
     await asyncio.sleep(1)
@@ -718,21 +739,21 @@ async def cb_confirm_yes(callback, state: FSMContext):
     except Exception as e:
         logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
 
-    # Сохраняем все заказы в pending
-    for order in created_orders:
-        pending_payments[order["order_id"]] = {
-            "user_id": user_id,
-            "chat_id": callback.message.chat.id,
-            "message_id": payment_msg.message_id,
-            "game_id": game_id,
-            "product_name": product["name"],
-            "payment_id": order["payment_id"],
-            "amount_kopecks": amount_kopecks,
-            "created_at": time.time(),
-            "payment_url": order["pay_url"],
-        }
+    # Сохраняем заказ в pending
+    pending_payments[order_id] = {
+        "user_id": user_id,
+        "chat_id": callback.message.chat.id,
+        "message_id": payment_msg.message_id,
+        "game_id": game_id,
+        "product_name": product["name"],
+        "payment_id": data.get("payment_id", ""),
+        "amount_kopecks": amount_kopecks,
+        "created_at": time.time(),
+        "payment_url": data["payment_url"],
+        "vps_orders": vps_orders,
+    }
     save_pending_to_file()
-    logger.info(f"Добавлено {len(created_orders)} заказов в очередь мониторинга")
+    logger.info(f"Заказ {order_id} добавлен в очередь мониторинга (vps_orders={vps_orders})")
 
     await callback.answer()
 
