@@ -39,14 +39,43 @@ logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ─── URL картинки UC ───
+UC_IMAGE_URL = "https://coolgameservice.com/wp-content/uploads/2024/03/11-png.webp"
+uc_image_data: bytes | None = None
+
 
 # ─── Каталог товаров ───
-# vps_orders — сколько заявок по 60 UC отправляется на VPS после оплаты
+# deliveries — список offer_id для доставки на VPS (каждый = одна заявка в FazerCards)
 # amount_kopecks — полная сумма одного платежа в копейках
 PRODUCTS = {
-    "60uc":  {"name": "60 UC",  "price": 82,  "amount_kopecks": 8200,  "vps_orders": 1},
-    "120uc": {"name": "120 UC", "price": 164, "amount_kopecks": 16400, "vps_orders": 2},
+    "60uc":   {"name": "60 UC",   "price": 82,   "amount_kopecks": 8200,   "deliveries": ["60_uc"]},
+    "120uc":  {"name": "120 UC",  "price": 164,  "amount_kopecks": 16400,  "deliveries": ["60_uc", "60_uc"]},
+    "180uc":  {"name": "180 UC",  "price": 246,  "amount_kopecks": 24600,  "deliveries": ["60_uc", "60_uc", "60_uc"]},
+    "240uc":  {"name": "240 UC",  "price": 328,  "amount_kopecks": 32800,  "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
+    "325uc":  {"name": "325 UC",  "price": 410,  "amount_kopecks": 41000,  "deliveries": ["325_uc"]},
+    "385uc":  {"name": "385 UC",  "price": 502,  "amount_kopecks": 50200,  "deliveries": ["325_uc", "60_uc"]},
+    "445uc":  {"name": "445 UC",  "price": 575,  "amount_kopecks": 57500,  "deliveries": ["60_uc", "60_uc", "325_uc"]},
+    "660uc":  {"name": "660 UC",  "price": 819,  "amount_kopecks": 81900,  "deliveries": ["660_uc"]},
+    "720uc":  {"name": "720 UC",  "price": 902,  "amount_kopecks": 90200,  "deliveries": ["660_uc", "60_uc"]},
+    "985uc":  {"name": "985 UC",  "price": 1230, "amount_kopecks": 123000, "deliveries": ["660_uc", "325_uc"]},
+    "1320uc": {"name": "1320 UC", "price": 1639, "amount_kopecks": 163900, "deliveries": ["660_uc", "660_uc"]},
+    "1800uc": {"name": "1800 UC", "price": 2049, "amount_kopecks": 204900, "deliveries": ["1800_uc"]},
+    "1920uc": {"name": "1920 UC", "price": 2214, "amount_kopecks": 221400, "deliveries": ["1800_uc", "60_uc", "60_uc"]},
+    "2125uc": {"name": "2125 UC", "price": 2479, "amount_kopecks": 247900, "deliveries": ["1800_uc", "325_uc"]},
+    "2460uc": {"name": "2460 UC", "price": 2870, "amount_kopecks": 287000, "deliveries": ["1800_uc", "660_uc"]},
+    "3850uc": {"name": "3850 UC", "price": 4119, "amount_kopecks": 411900, "deliveries": ["3850_uc"]},
+    "4510uc": {"name": "4510 UC", "price": 4979, "amount_kopecks": 497900, "deliveries": ["3850_uc", "660_uc"]},
 }
+
+# Порядок кнопок в каталоге (3 в ряд, 6 рядов)
+PRODUCT_GRID = [
+    "60uc", "120uc", "180uc",
+    "240uc", "325uc", "385uc",
+    "445uc", "660uc", "720uc",
+    "985uc", "1320uc", "1800uc",
+    "1920uc", "2125uc", "2460uc",
+    "3850uc", "4510uc",
+]
 
 
 # ─── FSM ───
@@ -162,6 +191,22 @@ def load_pending_from_file():
         logger.error(f"Не удалось загрузить pending_payments из файла: {e}")
 
 
+# ─── Загрузка картинки UC ───
+async def load_uc_image():
+    global uc_image_data
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(UC_IMAGE_URL) as resp:
+                if resp.status == 200:
+                    uc_image_data = await resp.read()
+                    logger.info("UC изображение загружено и закешировано")
+                else:
+                    logger.warning(f"Не удалось загрузить UC изображение: HTTP {resp.status}")
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки UC изображения: {e}")
+
+
 # ─── Клавиатуры ───
 def kb_start():
     b = InlineKeyboardBuilder()
@@ -200,10 +245,12 @@ def kb_pubg():
 
 def kb_pubg_products():
     b = InlineKeyboardBuilder()
-    b.button(text="60 UC — 82 ₽", callback_data="pubg_60uc")
-    b.button(text="120 UC — 164 ₽", callback_data="pubg_120uc")
+    for key in PRODUCT_GRID:
+        product = PRODUCTS[key]
+        b.button(text=f"{product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
-    b.adjust(1)
+    # 5 рядов по 3, последний ряд 2, плюс кнопка Назад
+    b.adjust(3, 3, 3, 3, 3, 2, 1)
     return b.as_markup()
 
 
@@ -296,11 +343,12 @@ async def vps_check_payment(order_id: str) -> bool | None:
 
 
 # ─── Отправка заявки на доставку UC на VPS ───
-# Вызывается после подтверждения оплаты. Для 120 UC вызывается дважды.
-async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int) -> bool:
+# offer_id определяет, какой товар отправлять: "60_uc", "325_uc", "660_uc", "1800_uc", "3850_uc"
+async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int, offer_id: str) -> bool:
     """
-    Отправляет заявку на доставку 60 UC на VPS.
+    Отправляет заявку на доставку UC на VPS.
     deliver_index — номер заявки (1, 2, ...), нужен для логов и уникальности.
+    offer_id — ID товара в FazerCards (60_uc, 325_uc, 660_uc, 1800_uc, 3850_uc).
     """
     try:
         timeout = aiohttp.ClientTimeout(total=15)
@@ -313,17 +361,17 @@ async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: 
                     "user_id": user_id,
                     "order_id": order_id,
                     "deliver_index": deliver_index,
-                    "uc_amount": 60,
+                    "offer_id": offer_id,
                 },
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    logger.error(f"VPS /deliver #{deliver_index} вернул HTTP {resp.status}: {text[:200]}")
+                    logger.error(f"VPS /deliver #{deliver_index} ({offer_id}) вернул HTTP {resp.status}: {text[:200]}")
                     return False
                 data = await resp.json()
                 return bool(data.get("success", False))
     except Exception as e:
-        logger.error(f"Ошибка доставки UC (заявка #{deliver_index}) к VPS: {e}")
+        logger.error(f"Ошибка доставки UC (заявка #{deliver_index}, offer={offer_id}): {e}")
         return False
 
 
@@ -371,18 +419,18 @@ async def check_payments_loop():
 
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
-                # ── Доставка UC на VPS (одна или несколько заявок по 60 UC) ──
-                vps_orders_count = info.get("vps_orders", 1)
+                # ── Доставка UC на VPS (одна или несколько заявок) ──
+                deliveries = info.get("deliveries", ["60_uc"])
                 game_id = info.get("game_id", "")
                 delivery_user_id = info.get("user_id", 0)
 
-                for i in range(vps_orders_count):
-                    success = await vps_deliver(game_id, delivery_user_id, order_id, i + 1)
+                for i, offer_id in enumerate(deliveries):
+                    success = await vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
                     if success:
-                        logger.info(f"Доставка {i+1}/{vps_orders_count} для заказа {order_id} — успешно")
+                        logger.info(f"Доставка {i+1}/{len(deliveries)} ({offer_id}) для заказа {order_id} — успешно")
                     else:
-                        logger.error(f"Доставка {i+1}/{vps_orders_count} для заказа {order_id} — НЕ удалась")
-                    if i < vps_orders_count - 1:
+                        logger.error(f"Доставка {i+1}/{len(deliveries)} ({offer_id}) для заказа {order_id} — НЕ удалась")
+                    if i < len(deliveries) - 1:
                         await asyncio.sleep(2)
 
                 notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
@@ -533,11 +581,23 @@ async def cb_back_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_buy_uc")
 async def cb_pubg_buy_uc(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(
-        callback,
-        "Выберите интересующий товар для игры PUBG Mobile",
-        kb_pubg_products(),
-    )
+    # Отправляем картинку с каталогом кнопок
+    if uc_image_data:
+        await callback.message.answer_photo(
+            uc_image_data,
+            caption="Выберите количество UC",
+            reply_markup=kb_pubg_products(),
+        )
+    else:
+        await callback.message.answer(
+            "Выберите количество UC",
+            reply_markup=kb_pubg_products(),
+        )
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
     await callback.answer()
 
 
@@ -559,23 +619,17 @@ async def cb_back_pubg(callback, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "pubg_60uc")
-async def cb_pubg_60uc(callback, state: FSMContext):
-    await state.set_state(OrderFlow.waiting_for_id)
-    await state.set_data({"product": "60uc"})
-    await callback.message.answer("Укажите ваш ID который должен начинаться на 5")
-    await asyncio.sleep(1)
-    try:
-        await callback.message.delete()
-    except Exception as e:
-        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
-    await callback.answer()
+# ── Универсальный обработчик выбора товара ──
+@dp.callback_query(F.data.startswith("pubg_prod:"))
+async def cb_pubg_product(callback, state: FSMContext):
+    product_key = callback.data.split(":")[1]
+    if product_key not in PRODUCTS:
+        logger.warning(f"Неизвестный товар: {product_key}")
+        await callback.answer("Товар не найден")
+        return
 
-
-@dp.callback_query(F.data == "pubg_120uc")
-async def cb_pubg_120uc(callback, state: FSMContext):
     await state.set_state(OrderFlow.waiting_for_id)
-    await state.set_data({"product": "120uc"})
+    await state.set_data({"product": product_key})
     await callback.message.answer("Укажите ваш ID который должен начинаться на 5")
     await asyncio.sleep(1)
     try:
@@ -603,7 +657,7 @@ async def process_game_id(message, state: FSMContext):
     await state.clear()
     logger.info(f"Получен game_id={game_id} от user_id={message.from_user.id}, product={product_key}")
     await message.answer(
-        f"Вы выбрали товар {product['name']} стоимостью в {product['price']} рублей\n"
+        f"Вы выбрали товар {product['name']} стоимостью в {product['price']}₽\n"
         f"Ваш ID: {game_id}",
         reply_markup=kb_confirm(game_id, product_key)
     )
@@ -620,11 +674,11 @@ async def cb_confirm_yes(callback, state: FSMContext):
     user_id = callback.from_user.id
     amount_kopecks = product["amount_kopecks"]
     total_price = product["price"]
-    vps_orders = product["vps_orders"]
+    deliveries = product["deliveries"]
 
     logger.info(
         f"Создание платежа: user_id={user_id}, game_id={game_id}, "
-        f"product={product_key}, amount={amount_kopecks} коп., vps_orders={vps_orders}"
+        f"product={product_key}, amount={amount_kopecks} коп., deliveries={deliveries}"
     )
 
     order_id = f"order-{user_id}-{int(time.time())}"
@@ -721,14 +775,14 @@ async def cb_confirm_yes(callback, state: FSMContext):
 
     # Клавиатура с одной кнопкой оплаты
     b = InlineKeyboardBuilder()
-    b.button(text=f"Оплатить {total_price} ₽", url=data["payment_url"])
+    b.button(text=f"Оплатить {total_price}₽", url=data["payment_url"])
     b.adjust(1)
 
     payment_text = (
         f"Заказ #{order_id}\n"
         f"Товар: {product['name']}\n"
         f"Ваш ID: {game_id}\n"
-        f"Сумма: {total_price} ₽\n\n"
+        f"Сумма: {total_price}₽\n\n"
         f"Нажмите «Оплатить», чтобы завершить покупку."
     )
 
@@ -750,10 +804,10 @@ async def cb_confirm_yes(callback, state: FSMContext):
         "amount_kopecks": amount_kopecks,
         "created_at": time.time(),
         "payment_url": data["payment_url"],
-        "vps_orders": vps_orders,
+        "deliveries": deliveries,
     }
     save_pending_to_file()
-    logger.info(f"Заказ {order_id} добавлен в очередь мониторинга (vps_orders={vps_orders})")
+    logger.info(f"Заказ {order_id} добавлен в очередь мониторинга (deliveries={deliveries})")
 
     await callback.answer()
 
@@ -776,7 +830,20 @@ async def cb_confirm_noid(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
+    # Возвращаемся к каталогу с картинкой
+    if uc_image_data:
+        await callback.message.answer_photo(
+            uc_image_data,
+            caption="Выберите количество UC",
+            reply_markup=kb_pubg_products(),
+        )
+    else:
+        await callback.message.answer("Выберите количество UC", reply_markup=kb_pubg_products())
+    await asyncio.sleep(1)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
     await callback.answer()
 
 
@@ -938,6 +1005,7 @@ async def main():
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
     load_pending_from_file()
+    await load_uc_image()
 
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
