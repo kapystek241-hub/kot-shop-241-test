@@ -226,7 +226,8 @@ def kb_pubg_products():
         product = PRODUCTS[key]
         b.button(text=f"UC {product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
-    b.adjust(3, 3, 3, 3, 3, 2, 1)
+    # 8 рядов по 2 кнопки + 1 кнопка (4510 UC) + Назад
+    b.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
     return b.as_markup()
 
 
