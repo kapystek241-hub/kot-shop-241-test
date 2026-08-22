@@ -12,6 +12,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -249,7 +250,6 @@ def kb_pubg_products():
         product = PRODUCTS[key]
         b.button(text=f"{product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
-    # 5 рядов по 3, последний ряд 2, плюс кнопка Назад
     b.adjust(3, 3, 3, 3, 3, 2, 1)
     return b.as_markup()
 
@@ -343,13 +343,7 @@ async def vps_check_payment(order_id: str) -> bool | None:
 
 
 # ─── Отправка заявки на доставку UC на VPS ───
-# offer_id определяет, какой товар отправлять: "60_uc", "325_uc", "660_uc", "1800_uc", "3850_uc"
 async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int, offer_id: str) -> bool:
-    """
-    Отправляет заявку на доставку UC на VPS.
-    deliver_index — номер заявки (1, 2, ...), нужен для логов и уникальности.
-    offer_id — ID товара в FazerCards (60_uc, 325_uc, 660_uc, 1800_uc, 3850_uc).
-    """
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -446,7 +440,6 @@ async def check_payments_loop():
                 except Exception as e:
                     logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
 
-                # Показываем раздел отзыва после оплаты
                 await bot.send_message(
                     info["chat_id"],
                     REVIEW_PROMPT_TEXT,
@@ -465,7 +458,7 @@ async def check_payments_loop():
             save_pending_to_file()
 
 
-# ─── Вспомогательная функция: отправить новое сообщение, затем удалить старое через 1 сек ───
+# ─── Вспомогательная функция ───
 async def answer_and_delete(callback, text, reply_markup=None):
     await callback.message.answer(text, reply_markup=reply_markup)
     await asyncio.sleep(1)
@@ -482,7 +475,6 @@ async def cmd_start(message):
     await message.answer(WELCOME_TEXT, reply_markup=kb_start())
 
 
-# ── Тестовая команда: имитация успешной оплаты ──
 @dp.message(F.text == "тест", StateFilter(None))
 async def cmd_test_purchase(message, state: FSMContext):
     logger.info(f"ТЕСТ: имитация успешной оплаты от user_id={message.from_user.id}")
@@ -498,14 +490,12 @@ async def cmd_test_purchase(message, state: FSMContext):
     await message.answer(REVIEW_PROMPT_TEXT, reply_markup=kb_review())
 
 
-# ── Раздел «Отзыв» (вызывается текстом «Отзыв») ──
 @dp.message(F.text == "Отзыв", StateFilter(None))
 async def cmd_review(message, state: FSMContext):
     await state.clear()
     await message.answer(REVIEW_PROMPT_TEXT, reply_markup=kb_review())
 
 
-# ── Меню и навигация ──
 @dp.callback_query(F.data == "menu")
 async def cb_menu(callback, state: FSMContext):
     await state.clear()
@@ -581,10 +571,9 @@ async def cb_back_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_buy_uc")
 async def cb_pubg_buy_uc(callback, state: FSMContext):
     await state.clear()
-    # Отправляем картинку с каталогом кнопок
     if uc_image_data:
         await callback.message.answer_photo(
-            uc_image_data,
+            BufferedInputFile(uc_image_data, filename="uc.webp"),
             caption="Выберите количество UC",
             reply_markup=kb_pubg_products(),
         )
@@ -830,10 +819,9 @@ async def cb_confirm_noid(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    # Возвращаемся к каталогу с картинкой
     if uc_image_data:
         await callback.message.answer_photo(
-            uc_image_data,
+            BufferedInputFile(uc_image_data, filename="uc.webp"),
             caption="Выберите количество UC",
             reply_markup=kb_pubg_products(),
         )
@@ -992,7 +980,7 @@ async def cb_review_cancel(callback, state: FSMContext):
 
 # ─── Глобальный обработчик ошибок ───
 @dp.error()
-async def on_error(event, exception):
+async def on_error(event, exception, *args, **kwargs):
     logger.error(f"Необработанная ошибка в хендлере: {exception}")
     logger.error(traceback.format_exc())
     return True
