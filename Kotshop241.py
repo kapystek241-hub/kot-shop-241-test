@@ -12,7 +12,6 @@ from aiogram.filters import Command, StateFilter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger("kotshop-bot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-VPS_API_URL = os.getenv("VPS_API_URL")  # например: http://123.45.67.89:8080
+VPS_API_URL = os.getenv("VPS_API_URL")
 API_SECRET = os.getenv("API_SECRET", "change-me")
 REVIEW_CHAT_ID = os.getenv("REVIEW_CHAT_ID", "")
 
@@ -40,14 +39,8 @@ logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ─── URL картинки UC ───
-UC_IMAGE_URL = "https://coolgameservice.com/wp-content/uploads/2024/03/11-png.webp"
-uc_image_data: bytes | None = None
-
 
 # ─── Каталог товаров ───
-# deliveries — список offer_id для доставки на VPS (каждый = одна заявка в FazerCards)
-# amount_kopecks — полная сумма одного платежа в копейках
 PRODUCTS = {
     "60uc":   {"name": "60 UC",   "price": 82,   "amount_kopecks": 8200,   "deliveries": ["60_uc"]},
     "120uc":  {"name": "120 UC",  "price": 164,  "amount_kopecks": 16400,  "deliveries": ["60_uc", "60_uc"]},
@@ -68,7 +61,6 @@ PRODUCTS = {
     "4510uc": {"name": "4510 UC", "price": 4979, "amount_kopecks": 497900, "deliveries": ["3850_uc", "660_uc"]},
 }
 
-# Порядок кнопок в каталоге (3 в ряд, 6 рядов)
 PRODUCT_GRID = [
     "60uc", "120uc", "180uc",
     "240uc", "325uc", "385uc",
@@ -192,22 +184,6 @@ def load_pending_from_file():
         logger.error(f"Не удалось загрузить pending_payments из файла: {e}")
 
 
-# ─── Загрузка картинки UC ───
-async def load_uc_image():
-    global uc_image_data
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(UC_IMAGE_URL) as resp:
-                if resp.status == 200:
-                    uc_image_data = await resp.read()
-                    logger.info("UC изображение загружено и закешировано")
-                else:
-                    logger.warning(f"Не удалось загрузить UC изображение: HTTP {resp.status}")
-    except Exception as e:
-        logger.warning(f"Ошибка загрузки UC изображения: {e}")
-
-
 # ─── Клавиатуры ───
 def kb_start():
     b = InlineKeyboardBuilder()
@@ -248,7 +224,7 @@ def kb_pubg_products():
     b = InlineKeyboardBuilder()
     for key in PRODUCT_GRID:
         product = PRODUCTS[key]
-        b.button(text=f"{product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
+        b.button(text=f"UC {product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(3, 3, 3, 3, 3, 2, 1)
     return b.as_markup()
@@ -413,7 +389,6 @@ async def check_payments_loop():
 
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
-                # ── Доставка UC на VPS (одна или несколько заявок) ──
                 deliveries = info.get("deliveries", ["60_uc"])
                 game_id = info.get("game_id", "")
                 delivery_user_id = info.get("user_id", 0)
@@ -571,22 +546,7 @@ async def cb_back_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_buy_uc")
 async def cb_pubg_buy_uc(callback, state: FSMContext):
     await state.clear()
-    if uc_image_data:
-        await callback.message.answer_photo(
-            BufferedInputFile(uc_image_data, filename="uc.webp"),
-            caption="Выберите количество UC",
-            reply_markup=kb_pubg_products(),
-        )
-    else:
-        await callback.message.answer(
-            "Выберите количество UC",
-            reply_markup=kb_pubg_products(),
-        )
-    await asyncio.sleep(1)
-    try:
-        await callback.message.delete()
-    except Exception as e:
-        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await answer_and_delete(callback, "Выберите количество UC", kb_pubg_products())
     await callback.answer()
 
 
@@ -762,7 +722,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
         await callback.answer()
         return
 
-    # Клавиатура с одной кнопкой оплаты
     b = InlineKeyboardBuilder()
     b.button(text=f"Оплатить {total_price}₽", url=data["payment_url"])
     b.adjust(1)
@@ -782,7 +741,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
     except Exception as e:
         logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
 
-    # Сохраняем заказ в pending
     pending_payments[order_id] = {
         "user_id": user_id,
         "chat_id": callback.message.chat.id,
@@ -819,19 +777,7 @@ async def cb_confirm_noid(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    if uc_image_data:
-        await callback.message.answer_photo(
-            BufferedInputFile(uc_image_data, filename="uc.webp"),
-            caption="Выберите количество UC",
-            reply_markup=kb_pubg_products(),
-        )
-    else:
-        await callback.message.answer("Выберите количество UC", reply_markup=kb_pubg_products())
-    await asyncio.sleep(1)
-    try:
-        await callback.message.delete()
-    except Exception as e:
-        logger.warning(f"Не удалось удалить сообщение {callback.message.message_id}: {e}")
+    await answer_and_delete(callback, "Выберите количество UC", kb_pubg_products())
     await callback.answer()
 
 
@@ -993,7 +939,6 @@ async def main():
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
     load_pending_from_file()
-    await load_uc_image()
 
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
