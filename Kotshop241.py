@@ -5,6 +5,7 @@ import json
 import logging
 import traceback
 import time
+import math
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -64,25 +65,31 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
-# ─── Каталог товаров ───
+# ─── ИЗМЕНЕНО: Каталог товаров (+1% к цене) ───
+PRICE_MARKUP = 1.01  # накрутка 1%
+
+def _apply_markup(price: int) -> int:
+    """Применяет 1% наценки и округляет вверх до целого рубля."""
+    return math.ceil(price * PRICE_MARKUP)
+
 PRODUCTS = {
-    "60uc":   {"name": "60 UC",   "price": 82,   "amount_kopecks": 8200,   "deliveries": ["60_uc"]},
-    "120uc":  {"name": "120 UC",  "price": 164,  "amount_kopecks": 16400,  "deliveries": ["60_uc", "60_uc"]},
-    "180uc":  {"name": "180 UC",  "price": 246,  "amount_kopecks": 24600,  "deliveries": ["60_uc", "60_uc", "60_uc"]},
-    "240uc":  {"name": "240 UC",  "price": 328,  "amount_kopecks": 32800,  "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
-    "325uc":  {"name": "325 UC",  "price": 410,  "amount_kopecks": 41000,  "deliveries": ["325_uc"]},
-    "385uc":  {"name": "385 UC",  "price": 502,  "amount_kopecks": 50200,  "deliveries": ["325_uc", "60_uc"]},
-    "445uc":  {"name": "445 UC",  "price": 575,  "amount_kopecks": 57500,  "deliveries": ["60_uc", "60_uc", "325_uc"]},
-    "660uc":  {"name": "660 UC",  "price": 819,  "amount_kopecks": 81900,  "deliveries": ["660_uc"]},
-    "720uc":  {"name": "720 UC",  "price": 902,  "amount_kopecks": 90200,  "deliveries": ["660_uc", "60_uc"]},
-    "985uc":  {"name": "985 UC",  "price": 1230, "amount_kopecks": 123000, "deliveries": ["660_uc", "325_uc"]},
-    "1320uc": {"name": "1320 UC", "price": 1639, "amount_kopecks": 163900, "deliveries": ["660_uc", "660_uc"]},
-    "1800uc": {"name": "1800 UC", "price": 2049, "amount_kopecks": 204900, "deliveries": ["1800_uc"]},
-    "1920uc": {"name": "1920 UC", "price": 2214, "amount_kopecks": 221400, "deliveries": ["1800_uc", "60_uc", "60_uc"]},
-    "2125uc": {"name": "2125 UC", "price": 2479, "amount_kopecks": 247900, "deliveries": ["1800_uc", "325_uc"]},
-    "2460uc": {"name": "2460 UC", "price": 2870, "amount_kopecks": 287000, "deliveries": ["1800_uc", "660_uc"]},
-    "3850uc": {"name": "3850 UC", "price": 4119, "amount_kopecks": 411900, "deliveries": ["3850_uc"]},
-    "4510uc": {"name": "4510 UC", "price": 4979, "amount_kopecks": 497900, "deliveries": ["3850_uc", "660_uc"]},
+    "60uc":   {"name": "60 UC",   "price": _apply_markup(82),   "amount_kopecks": _apply_markup(82)   * 100, "deliveries": ["60_uc"]},
+    "120uc":  {"name": "120 UC",  "price": _apply_markup(164),  "amount_kopecks": _apply_markup(164)  * 100, "deliveries": ["60_uc", "60_uc"]},
+    "180uc":  {"name": "180 UC",  "price": _apply_markup(246),  "amount_kopecks": _apply_markup(246)  * 100, "deliveries": ["60_uc", "60_uc", "60_uc"]},
+    "240uc":  {"name": "240 UC",  "price": _apply_markup(328),  "amount_kopecks": _apply_markup(328)  * 100, "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
+    "325uc":  {"name": "325 UC",  "price": _apply_markup(410),  "amount_kopecks": _apply_markup(410)  * 100, "deliveries": ["325_uc"]},
+    "385uc":  {"name": "385 UC",  "price": _apply_markup(502),  "amount_kopecks": _apply_markup(502)  * 100, "deliveries": ["325_uc", "60_uc"]},
+    "445uc":  {"name": "445 UC",  "price": _apply_markup(575),  "amount_kopecks": _apply_markup(575)  * 100, "deliveries": ["60_uc", "60_uc", "325_uc"]},
+    "660uc":  {"name": "660 UC",  "price": _apply_markup(819),  "amount_kopecks": _apply_markup(819)  * 100, "deliveries": ["660_uc"]},
+    "720uc":  {"name": "720 UC",  "price": _apply_markup(902),  "amount_kopecks": _apply_markup(902)  * 100, "deliveries": ["660_uc", "60_uc"]},
+    "985uc":  {"name": "985 UC",  "price": _apply_markup(1230), "amount_kopecks": _apply_markup(1230) * 100, "deliveries": ["660_uc", "325_uc"]},
+    "1320uc": {"name": "1320 UC", "price": _apply_markup(1639), "amount_kopecks": _apply_markup(1639) * 100, "deliveries": ["660_uc", "660_uc"]},
+    "1800uc": {"name": "1800 UC", "price": _apply_markup(2049), "amount_kopecks": _apply_markup(2049) * 100, "deliveries": ["1800_uc"]},
+    "1920uc": {"name": "1920 UC", "price": _apply_markup(2214), "amount_kopecks": _apply_markup(2214) * 100, "deliveries": ["1800_uc", "60_uc", "60_uc"]},
+    "2125uc": {"name": "2125 UC", "price": _apply_markup(2479), "amount_kopecks": _apply_markup(2479) * 100, "deliveries": ["1800_uc", "325_uc"]},
+    "2460uc": {"name": "2460 UC", "price": _apply_markup(2870), "amount_kopecks": _apply_markup(2870) * 100, "deliveries": ["1800_uc", "660_uc"]},
+    "3850uc": {"name": "3850 UC", "price": _apply_markup(4119), "amount_kopecks": _apply_markup(4119) * 100, "deliveries": ["3850_uc"]},
+    "4510uc": {"name": "4510 UC", "price": _apply_markup(4979), "amount_kopecks": _apply_markup(4979) * 100, "deliveries": ["3850_uc", "660_uc"]},
 }
 
 PRODUCT_GRID = [
@@ -247,113 +254,127 @@ def load_balance():
         logger.error(f"Не удалось загрузить баланс из файла: {e}")
 
 
-# ─── Клавиатуры ───
-def kb_start():
+# ─── ИЗМЕНЕНО: Кэшированные клавиатуры ───
+# Статические клавиатуры собираются один раз при старте и переиспользуются.
+
+_kb_start:       object = None
+_kb_menu:        object = None
+_kb_buy:         object = None
+_kb_pubg:        object = None
+_kb_pubg_products: object = None
+_kb_pubg_other:  object = None
+_kb_back_to_menu: object = None
+_kb_policy:      object = None
+_kb_support:     object = None
+_kb_review:      object = None
+_kb_review_rating: object = None
+_kb_review_confirm: object = None
+
+
+def init_keyboards():
+    """Собирает все статические клавиатуры один раз при старте бота."""
+    global _kb_start, _kb_menu, _kb_buy, _kb_pubg, _kb_pubg_products
+    global _kb_pubg_other, _kb_back_to_menu, _kb_policy, _kb_support
+    global _kb_review, _kb_review_rating, _kb_review_confirm
+
+    # ── kb_start ──
     b = InlineKeyboardBuilder()
     b.button(text="Меню", callback_data="menu")
     b.button(text="Политика компании", callback_data="oferta")
     b.adjust(2)
-    return b.as_markup()
+    _kb_start = b.as_markup()
 
-
-def kb_menu():
+    # ── kb_menu ──
     b = InlineKeyboardBuilder()
     b.button(text="Купить", callback_data="buy")
     b.button(text="Поддержка", callback_data="support")
     b.button(text="Турнир", callback_data="tournament")
     b.button(text="Назад", callback_data="back_start")
     b.adjust(2, 1, 1)
-    return b.as_markup()
+    _kb_menu = b.as_markup()
 
-
-def kb_buy():
+    # ── kb_buy ──
     b = InlineKeyboardBuilder()
     b.button(text="PUBG Mobile", callback_data="pubg")
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
-    return b.as_markup()
+    _kb_buy = b.as_markup()
 
-
-def kb_pubg():
+    # ── kb_pubg ──
     b = InlineKeyboardBuilder()
     b.button(text="Купить UC по ID", callback_data="pubg_buy_uc")
     b.button(text="Другие товары", callback_data="pubg_other")
     b.button(text="Назад", callback_data="back_buy")
     b.adjust(1)
-    return b.as_markup()
+    _kb_pubg = b.as_markup()
 
-
-def kb_pubg_products():
+    # ── kb_pubg_products ──
     b = InlineKeyboardBuilder()
     for key in PRODUCT_GRID:
         product = PRODUCTS[key]
         b.button(text=f"UC {product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
-    return b.as_markup()
+    _kb_pubg_products = b.as_markup()
 
-
-def kb_pubg_other():
+    # ── kb_pubg_other ──
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(1)
-    return b.as_markup()
+    _kb_pubg_other = b.as_markup()
 
-
-def kb_confirm(game_id: str, product_key: str):
-    b = InlineKeyboardBuilder()
-    b.button(text="Все верно", callback_data=f"confirm_yes:{game_id}:{product_key}")
-    b.button(text="Неверный ID", callback_data=f"confirm_noid:{product_key}")
-    b.button(text="Я передумал", callback_data="confirm_cancel")
-    b.adjust(1)
-    return b.as_markup()
-
-
-def kb_back_to_menu():
+    # ── kb_back_to_menu ──
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
-    return b.as_markup()
+    _kb_back_to_menu = b.as_markup()
 
-
-def kb_policy():
+    # ── kb_policy ──
     b = InlineKeyboardBuilder()
     b.button(text="Меню", callback_data="menu")
     b.adjust(1)
-    return b.as_markup()
+    _kb_policy = b.as_markup()
 
-
-def kb_support():
+    # ── kb_support ──
     b = InlineKeyboardBuilder()
     b.button(text="Поддержка", url="https://t.me/KotShop2415")
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
-    return b.as_markup()
+    _kb_support = b.as_markup()
 
-
-def kb_review():
+    # ── kb_review ──
     b = InlineKeyboardBuilder()
     b.button(text="Оценить", callback_data="review_start")
     b.button(text="В меню", callback_data="menu")
     b.adjust(1)
-    return b.as_markup()
+    _kb_review = b.as_markup()
 
-
-def kb_review_rating():
+    # ── kb_review_rating ──
     b = InlineKeyboardBuilder()
     b.button(text="Написать отзыв", callback_data="review_write")
     b.button(text="Отправить без текста", callback_data="review_send_stars_only")
     b.button(text="Отменить", callback_data="review_cancel")
     b.adjust(1)
-    return b.as_markup()
+    _kb_review_rating = b.as_markup()
 
-
-def kb_review_confirm():
+    # ── kb_review_confirm ──
     b = InlineKeyboardBuilder()
     b.button(text="Отправить", callback_data="review_send")
     b.button(text="Изменить текст", callback_data="review_edit_text")
     b.button(text="Поменять оценку", callback_data="review_change_rating")
     b.button(text="В меню", callback_data="review_to_menu")
+    b.adjust(1)
+    _kb_review_confirm = b.as_markup()
+
+    logger.info("Все статические клавиатуры собраны и закешированы")
+
+
+# kb_confirm — единственная динамическая клавиатура, строится на лету
+def kb_confirm(game_id: str, product_key: str):
+    b = InlineKeyboardBuilder()
+    b.button(text="Все верно", callback_data=f"confirm_yes:{game_id}:{product_key}")
+    b.button(text="Неверный ID", callback_data=f"confirm_noid:{product_key}")
+    b.button(text="Я передумал", callback_data="confirm_cancel")
     b.adjust(1)
     return b.as_markup()
 
@@ -422,7 +443,7 @@ async def process_paid_order(order_id: str, info: dict):
     game_id = info.get("game_id", "")
     delivery_user_id = info.get("user_id", 0)
 
-    # ─── НОВОЕ: параллельная доставка всех частей заказа ───
+    # Параллельная доставка всех частей заказа
     tasks = [
         vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
         for i, offer_id in enumerate(deliveries)
@@ -454,7 +475,7 @@ async def process_paid_order(order_id: str, info: dict):
     await bot.send_message(
         info["chat_id"],
         REVIEW_PROMPT_TEXT,
-        reply_markup=kb_review(),
+        reply_markup=_kb_review,
     )
 
 
@@ -475,7 +496,7 @@ async def check_payments_loop():
                     info["chat_id"],
                     "Похоже, платёж прервался. Ничего страшного — "
                     "просто создайте заказ ещё раз, и сможете оплатить.",
-                    reply_markup=kb_back_to_menu(),
+                    reply_markup=_kb_back_to_menu,
                 )
                 await asyncio.sleep(1)
                 try:
@@ -497,7 +518,7 @@ async def check_payments_loop():
                     continue
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
-                # Списываем баланс последовательно (быстро, без I/O кроме файла)
+                # Списываем баланс последовательно
                 global kotshop_balance
                 if kotshop_balance is not None:
                     price = info.get("amount_kopecks", 0) / 100
@@ -538,7 +559,7 @@ async def answer_and_delete(callback, text, reply_markup=None):
 @dp.message(Command("start"))
 async def cmd_start(message):
     logger.info(f"/start от user_id={message.from_user.id}, username={message.from_user.username}")
-    await message.answer(WELCOME_TEXT, reply_markup=kb_start())
+    await message.answer(WELCOME_TEXT, reply_markup=_kb_start)
 
 
 # ─── БАЛАНС: команда установки баланса (KotShopBalans=5000) ───
@@ -584,7 +605,7 @@ async def cmd_see_balance(message, state: FSMContext):
 @dp.message(lambda m: m.text and m.text.lower().strip() in MENU_KW, StateFilter(None))
 async def kw_menu(message, state: FSMContext):
     await state.clear()
-    await message.answer(MENU_TEXT, reply_markup=kb_menu())
+    await message.answer(MENU_TEXT, reply_markup=_kb_menu)
 
 
 @dp.message(lambda m: m.text and m.text.lower().strip() in BUY_KW, StateFilter(None))
@@ -592,26 +613,26 @@ async def kw_buy(message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Выберите нужную игру или напишите название игры для получения раздела покупки",
-        reply_markup=kb_buy(),
+        reply_markup=_kb_buy,
     )
 
 
 @dp.message(lambda m: m.text and m.text.lower().strip() in PUBG_KW, StateFilter(None))
 async def kw_pubg(message, state: FSMContext):
     await state.clear()
-    await message.answer("Выберите нужный раздел", reply_markup=kb_pubg())
+    await message.answer("Выберите нужный раздел", reply_markup=_kb_pubg)
 
 
 @dp.message(lambda m: m.text and m.text.lower().strip() in UC_KW, StateFilter(None))
 async def kw_uc(message, state: FSMContext):
     await state.clear()
-    await message.answer("Выберите количество UC", reply_markup=kb_pubg_products())
+    await message.answer("Выберите количество UC", reply_markup=_kb_pubg_products)
 
 
 @dp.message(lambda m: m.text and m.text.lower().strip() in SUPPORT_KW, StateFilter(None))
 async def kw_support(message, state: FSMContext):
     await state.clear()
-    await message.answer(SUPPORT_TEXT, reply_markup=kb_support())
+    await message.answer(SUPPORT_TEXT, reply_markup=_kb_support)
 
 
 @dp.message(F.text == "тест", StateFilter(None))
@@ -626,33 +647,33 @@ async def cmd_test_purchase(message, state: FSMContext):
     except Exception as e:
         logger.warning(f"Не удалось удалить тестовое сообщение «Оплата выполнена»: {e}")
 
-    await message.answer(REVIEW_PROMPT_TEXT, reply_markup=kb_review())
+    await message.answer(REVIEW_PROMPT_TEXT, reply_markup=_kb_review)
 
 
 @dp.message(F.text == "Отзыв", StateFilter(None))
 async def cmd_review(message, state: FSMContext):
     await state.clear()
-    await message.answer(REVIEW_PROMPT_TEXT, reply_markup=kb_review())
+    await message.answer(REVIEW_PROMPT_TEXT, reply_markup=_kb_review)
 
 
 @dp.callback_query(F.data == "menu")
 async def cb_menu(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, MENU_TEXT, kb_menu())
+    await answer_and_delete(callback, MENU_TEXT, _kb_menu)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "oferta")
 async def cb_oferta(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, POLICY_TEXT, kb_policy())
+    await answer_and_delete(callback, POLICY_TEXT, _kb_policy)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_start")
 async def cb_back_start(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, WELCOME_TEXT, kb_start())
+    await answer_and_delete(callback, WELCOME_TEXT, _kb_start)
     await callback.answer()
 
 
@@ -662,7 +683,7 @@ async def cb_buy(callback, state: FSMContext):
     await answer_and_delete(
         callback,
         "Выберите нужную игру или напишите название игры для получения раздела покупки",
-        kb_buy(),
+        _kb_buy,
     )
     await callback.answer()
 
@@ -670,21 +691,21 @@ async def cb_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "support")
 async def cb_support(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, SUPPORT_TEXT, kb_support())
+    await answer_and_delete(callback, SUPPORT_TEXT, _kb_support)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "tournament")
 async def cb_tournament(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "🏆 Турнирный раздел в разработке", kb_menu())
+    await answer_and_delete(callback, "🏆 Турнирный раздел в разработке", _kb_menu)
     await callback.answer()
 
 
 @dp.callback_query(F.data == "back_menu")
 async def cb_back_menu(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, MENU_TEXT, kb_menu())
+    await answer_and_delete(callback, MENU_TEXT, _kb_menu)
     await callback.answer()
 
 
@@ -692,7 +713,7 @@ async def cb_back_menu(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg")
 async def cb_pubg(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
+    await answer_and_delete(callback, "Выберите нужный раздел", _kb_pubg)
     await callback.answer()
 
 
@@ -702,7 +723,7 @@ async def cb_back_buy(callback, state: FSMContext):
     await answer_and_delete(
         callback,
         "Выберите нужную игру или напишите название игры для получения раздела покупки",
-        kb_buy(),
+        _kb_buy,
     )
     await callback.answer()
 
@@ -710,7 +731,7 @@ async def cb_back_buy(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_buy_uc")
 async def cb_pubg_buy_uc(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Выберите количество UC", kb_pubg_products())
+    await answer_and_delete(callback, "Выберите количество UC", _kb_pubg_products)
     await callback.answer()
 
 
@@ -720,7 +741,7 @@ async def cb_pubg_other(callback, state: FSMContext):
     await answer_and_delete(
         callback,
         "На данный момент этот раздел в разработке",
-        kb_pubg_other(),
+        _kb_pubg_other,
     )
     await callback.answer()
 
@@ -728,7 +749,7 @@ async def cb_pubg_other(callback, state: FSMContext):
 @dp.callback_query(F.data == "back_pubg")
 async def cb_back_pubg(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Выберите нужный раздел", kb_pubg())
+    await answer_and_delete(callback, "Выберите нужный раздел", _kb_pubg)
     await callback.answer()
 
 
@@ -812,7 +833,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
     logger.info(f"Создание заказа: order_id={order_id}")
 
     try:
-        # ─── НОВОЕ: используем общий HTTP-сессия ───
         session = await get_http_session()
         async with session.post(
             f"{VPS_API_URL}/create-payment",
@@ -955,7 +975,7 @@ async def cb_confirm_noid(callback, state: FSMContext):
 @dp.callback_query(F.data == "confirm_cancel")
 async def cb_confirm_cancel(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, "Выберите количество UC", kb_pubg_products())
+    await answer_and_delete(callback, "Выберите количество UC", _kb_pubg_products)
     await callback.answer()
 
 
@@ -985,7 +1005,7 @@ async def process_rating(message, state: FSMContext):
     await state.set_data({"rating": rating})
     await message.answer(
         f"{stars}\n\nЗдесь будет ваш отзыв, напишите его",
-        reply_markup=kb_review_rating()
+        reply_markup=_kb_review_rating
     )
 
 
@@ -1012,7 +1032,7 @@ async def process_review_text(message, state: FSMContext):
     await state.set_data({"rating": rating, "review_text": review_text})
     await message.answer(
         f"{stars}\n\n{review_text}",
-        reply_markup=kb_review_confirm()
+        reply_markup=_kb_review_confirm
     )
 
 
@@ -1027,7 +1047,7 @@ async def cb_review_send(callback, state: FSMContext):
     await send_review_to_group(full_review)
 
     await state.clear()
-    await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=kb_menu())
+    await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=_kb_menu)
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -1069,7 +1089,7 @@ async def cb_review_change_rating(callback, state: FSMContext):
 @dp.callback_query(F.data == "review_to_menu")
 async def cb_review_to_menu(callback, state: FSMContext):
     await state.clear()
-    await callback.message.answer(MENU_TEXT, reply_markup=kb_menu())
+    await callback.message.answer(MENU_TEXT, reply_markup=_kb_menu)
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -1086,7 +1106,7 @@ async def cb_review_send_stars_only(callback, state: FSMContext):
 
     await send_review_to_group(stars)
     await state.clear()
-    await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=kb_menu())
+    await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=_kb_menu)
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -1098,7 +1118,7 @@ async def cb_review_send_stars_only(callback, state: FSMContext):
 @dp.callback_query(F.data == "review_cancel")
 async def cb_review_cancel(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(callback, MENU_TEXT, kb_menu())
+    await answer_and_delete(callback, MENU_TEXT, _kb_menu)
     await callback.answer()
 
 
@@ -1115,6 +1135,9 @@ async def main():
     logger.info("BotHost бот запущен")
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
+
+    # ─── ИЗМЕНЕНО: инициализация клавиатур до старта поллинга ───
+    init_keyboards()
 
     load_pending_from_file()
     load_balance()
