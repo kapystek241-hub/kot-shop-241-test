@@ -37,7 +37,7 @@ if _admin_ids_raw:
 logger.info(f"ADMIN_IDS: {ADMIN_IDS if ADMIN_IDS else '(не заданы)'}")
 
 # ─── БАЛАНС: глобальная переменная и файл ───
-kotshop_balance: float | None = None  # None = лимит не задан (покупки не ограничены)
+kotshop_balance: float | None = None
 BALANCE_FILE = os.getenv("BALANCE_FILE", "kotshop_balance.json")
 
 if not all([BOT_TOKEN, VPS_API_URL]):
@@ -49,6 +49,19 @@ logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# ─── НОВОЕ: глобальный HTTP-сессия для переиспользования соединений ───
+http_session: aiohttp.ClientSession | None = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    global http_session
+    if http_session is None or http_session.closed:
+        http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15),
+            connector=aiohttp.TCPConnector(limit=20, limit_per_host=10),
+        )
+    return http_session
 
 
 # ─── Каталог товаров ───
@@ -163,6 +176,16 @@ BALANCE_INSUFFICIENT_TEXT = (
     "Вы можете дождаться обновления на следующий день или обратиться в поддержку — "
     "мы отправим товар на ваш аккаунт вручную."
 )
+
+# ─── НОВОЕ: наборы ключевых слов для текстовых команд ───
+MENU_KW = {"меню"}
+BUY_KW = {"купить", "закупиться", "товар"}
+PUBG_KW = {"пабг", "пабджи", "pubg"}
+UC_KW = {"юси", "uc"}
+SUPPORT_KW = {
+    "поддержка", "связь", "менеджер", "подержка",
+    "проблема", "написать в поддержку",
+}
 
 
 # ─── Файл для сохранения ожидающих платежей ───
@@ -335,51 +358,46 @@ def kb_review_confirm():
     return b.as_markup()
 
 
-# ─── Запрос статуса платежа к VPS ───
+# ─── НОВОЕ: Запрос статуса платежа к VPS (через общий HTTP-сессия) ───
 async def vps_check_payment(order_id: str) -> bool | None:
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{VPS_API_URL}/check-payment",
-                json={
-                    "secret": API_SECRET,
-                    "order_id": order_id,
-                },
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error(f"VPS /check-payment вернул HTTP {resp.status}: {text[:200]}")
-                    return None
-                data = await resp.json()
-                return bool(data.get("paid", False))
+        session = await get_http_session()
+        async with session.post(
+            f"{VPS_API_URL}/check-payment",
+            json={"secret": API_SECRET, "order_id": order_id},
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error(f"VPS /check-payment вернул HTTP {resp.status}: {text[:200]}")
+                return None
+            data = await resp.json()
+            return bool(data.get("paid", False))
     except Exception as e:
         logger.error(f"Ошибка запроса статуса платежа {order_id} к VPS: {e}")
         return None
 
 
-# ─── Отправка заявки на доставку UC на VPS ───
+# ─── НОВОЕ: Отправка заявки на доставку UC (через общий HTTP-сессия) ───
 async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int, offer_id: str) -> bool:
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{VPS_API_URL}/deliver",
-                json={
-                    "secret": API_SECRET,
-                    "game_id": game_id,
-                    "user_id": user_id,
-                    "order_id": order_id,
-                    "deliver_index": deliver_index,
-                    "offer_id": offer_id,
-                },
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.error(f"VPS /deliver #{deliver_index} ({offer_id}) вернул HTTP {resp.status}: {text[:200]}")
-                    return False
-                data = await resp.json()
-                return bool(data.get("success", False))
+        session = await get_http_session()
+        async with session.post(
+            f"{VPS_API_URL}/deliver",
+            json={
+                "secret": API_SECRET,
+                "game_id": game_id,
+                "user_id": user_id,
+                "order_id": order_id,
+                "deliver_index": deliver_index,
+                "offer_id": offer_id,
+            },
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.error(f"VPS /deliver #{deliver_index} ({offer_id}) вернул HTTP {resp.status}: {text[:200]}")
+                return False
+            data = await resp.json()
+            return bool(data.get("success", False))
     except Exception as e:
         logger.error(f"Ошибка доставки UC (заявка #{deliver_index}, offer={offer_id}): {e}")
         return False
@@ -397,39 +415,89 @@ async def send_review_to_group(text: str):
         logger.error(f"Не удалось отправить отзыв в группу: {e}")
 
 
-# ─── Фоновая задача: проверка статуса платежей ───
+# ─── НОВОЕ: обработка одного оплаченного заказа (доставка + уведомление) ───
+async def process_paid_order(order_id: str, info: dict):
+    """Доставка и уведомление по одному подтверждённому заказу — работает конкурентно."""
+    deliveries = info.get("deliveries", ["60_uc"])
+    game_id = info.get("game_id", "")
+    delivery_user_id = info.get("user_id", 0)
+
+    # ─── НОВОЕ: параллельная доставка всех частей заказа ───
+    tasks = [
+        vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
+        for i, offer_id in enumerate(deliveries)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"Доставка {i+1}/{len(deliveries)} для {order_id} — ошибка: {result}")
+        elif result:
+            logger.info(f"Доставка {i+1}/{len(deliveries)} для {order_id} — успешно")
+        else:
+            logger.error(f"Доставка {i+1}/{len(deliveries)} для {order_id} — НЕ удалась")
+
+    # Уведомление пользователя
+    notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
+    await asyncio.sleep(2)
+    try:
+        await notify_msg.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
+
+    await asyncio.sleep(1)
+    try:
+        await bot.delete_message(info["chat_id"], info["message_id"])
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
+
+    await bot.send_message(
+        info["chat_id"],
+        REVIEW_PROMPT_TEXT,
+        reply_markup=kb_review(),
+    )
+
+
+# ─── НОВОЕ: фоновая задача — конкурентная проверка и обработка платежей ───
 async def check_payments_loop():
     logger.info("Запущен цикл проверки платежей (интервал 15 сек, таймаут 600 сек)")
     while True:
         await asyncio.sleep(15)
         now = time.time()
         to_remove = []
+        to_check = []
 
+        # 1) Разделаем на истёкшие и активные
         for order_id, info in list(pending_payments.items()):
-            try:
-                if now - info["created_at"] > PAYMENT_TIMEOUT:
-                    logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
-                    await bot.send_message(
-                        info["chat_id"],
-                        "Похоже, платёж прервался. Ничего страшного — "
-                        "просто создайте заказ ещё раз, и сможете оплатить.",
-                        reply_markup=kb_back_to_menu(),
-                    )
-                    await asyncio.sleep(1)
-                    try:
-                        await bot.delete_message(info["chat_id"], info["message_id"])
-                    except Exception as e:
-                        logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
-                    to_remove.append(order_id)
-                    continue
+            if now - info["created_at"] > PAYMENT_TIMEOUT:
+                logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
+                await bot.send_message(
+                    info["chat_id"],
+                    "Похоже, платёж прервался. Ничего страшного — "
+                    "просто создайте заказ ещё раз, и сможете оплатить.",
+                    reply_markup=kb_back_to_menu(),
+                )
+                await asyncio.sleep(1)
+                try:
+                    await bot.delete_message(info["chat_id"], info["message_id"])
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить сообщение {info['message_id']}: {e}")
+                to_remove.append(order_id)
+            else:
+                to_check.append((order_id, info))
 
-                paid = await vps_check_payment(order_id)
+        # 2) Конкурентная проверка статусов всех активных платежей
+        if to_check:
+            check_tasks = [vps_check_payment(oid) for oid, _ in to_check]
+            results = await asyncio.gather(*check_tasks)
+
+            confirmed = []
+            for (order_id, info), paid in zip(to_check, results):
                 if paid is None or not paid:
                     continue
-
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
-                # ─── БАЛАНС: списание стоимости заказа ───
+                # Списываем баланс последовательно (быстро, без I/O кроме файла)
                 global kotshop_balance
                 if kotshop_balance is not None:
                     price = info.get("amount_kopecks", 0) / 100
@@ -439,44 +507,17 @@ async def check_payments_loop():
                     save_balance()
                     logger.info(f"Баланс списан на {price}₽, остаток: {kotshop_balance}₽ (заказ {order_id})")
 
-                deliveries = info.get("deliveries", ["60_uc"])
-                game_id = info.get("game_id", "")
-                delivery_user_id = info.get("user_id", 0)
-
-                for i, offer_id in enumerate(deliveries):
-                    success = await vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
-                    if success:
-                        logger.info(f"Доставка {i+1}/{len(deliveries)} ({offer_id}) для заказа {order_id} — успешно")
-                    else:
-                        logger.error(f"Доставка {i+1}/{len(deliveries)} ({offer_id}) для заказа {order_id} — НЕ удалась")
-                    if i < len(deliveries) - 1:
-                        await asyncio.sleep(2)
-
-                notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
-                await asyncio.sleep(2)
-                try:
-                    await notify_msg.delete()
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить сообщение «Оплата выполнена»: {e}")
-
-                await asyncio.sleep(1)
-                try:
-                    await bot.delete_message(info["chat_id"], info["message_id"])
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить сообщение с ссылкой на оплату: {e}")
-
-                await bot.send_message(
-                    info["chat_id"],
-                    REVIEW_PROMPT_TEXT,
-                    reply_markup=kb_review(),
-                )
+                confirmed.append((order_id, info))
                 to_remove.append(order_id)
 
-            except Exception as e:
-                logger.error(f"Непредвиденная ошибка при обработке платежа {order_id}: {e}")
-                logger.error(traceback.format_exc())
-                continue
+            # 3) Конкурентная обработка всех подтверждённых заказов
+            if confirmed:
+                process_tasks = [
+                    process_paid_order(oid, info) for oid, info in confirmed
+                ]
+                await asyncio.gather(*process_tasks, return_exceptions=True)
 
+        # 4) Очистка
         if to_remove:
             for order_id in to_remove:
                 pending_payments.pop(order_id, None)
@@ -504,7 +545,7 @@ async def cmd_start(message):
 @dp.message(F.text.startswith("KotShopBalans="), StateFilter(None))
 async def cmd_set_balance(message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
-        return  # молча игнорируем не-админов
+        return
 
     try:
         value = float(message.text.split("=", 1)[1].strip())
@@ -530,12 +571,47 @@ async def cmd_set_balance(message, state: FSMContext):
 @dp.message(F.text == "KotShopSee", StateFilter(None))
 async def cmd_see_balance(message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
-        return  # молча игнорируем не-админов
+        return
 
     if kotshop_balance is None:
         await message.answer("📊 Баланс не задан — лимит отключён (покупки не ограничены).")
     else:
         await message.answer(f"📊 Текущий остаток баланса: {kotshop_balance}₽")
+
+
+# ─── НОВОЕ: текстовые команды по ключевым словам ───
+
+@dp.message(lambda m: m.text and m.text.lower().strip() in MENU_KW, StateFilter(None))
+async def kw_menu(message, state: FSMContext):
+    await state.clear()
+    await message.answer(MENU_TEXT, reply_markup=kb_menu())
+
+
+@dp.message(lambda m: m.text and m.text.lower().strip() in BUY_KW, StateFilter(None))
+async def kw_buy(message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "Выберите нужную игру или напишите название игры для получения раздела покупки",
+        reply_markup=kb_buy(),
+    )
+
+
+@dp.message(lambda m: m.text and m.text.lower().strip() in PUBG_KW, StateFilter(None))
+async def kw_pubg(message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите нужный раздел", reply_markup=kb_pubg())
+
+
+@dp.message(lambda m: m.text and m.text.lower().strip() in UC_KW, StateFilter(None))
+async def kw_uc(message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите количество UC", reply_markup=kb_pubg_products())
+
+
+@dp.message(lambda m: m.text and m.text.lower().strip() in SUPPORT_KW, StateFilter(None))
+async def kw_support(message, state: FSMContext):
+    await state.clear()
+    await message.answer(SUPPORT_TEXT, reply_markup=kb_support())
 
 
 @dp.message(F.text == "тест", StateFilter(None))
@@ -612,7 +688,7 @@ async def cb_back_menu(callback, state: FSMContext):
     await callback.answer()
 
 
-# ── PubG Mobile ──
+# ── PUBG Mobile ──
 @dp.callback_query(F.data == "pubg")
 async def cb_pubg(callback, state: FSMContext):
     await state.clear()
@@ -736,35 +812,35 @@ async def cb_confirm_yes(callback, state: FSMContext):
     logger.info(f"Создание заказа: order_id={order_id}")
 
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{VPS_API_URL}/create-payment",
-                json={
-                    "secret": API_SECRET,
-                    "order_id": order_id,
-                    "amount_kopecks": amount_kopecks,
-                    "game_id": game_id,
-                    "user_id": user_id,
-                    "description": f"Покупка {product['name']} для PUBG Mobile. Игровой ID: {game_id}",
-                    "email": "noreply@kotshop241.ru",
-                }
-            ) as resp:
-                logger.info(f"Ответ бэкенда: HTTP {resp.status}")
+        # ─── НОВОЕ: используем общий HTTP-сессия ───
+        session = await get_http_session()
+        async with session.post(
+            f"{VPS_API_URL}/create-payment",
+            json={
+                "secret": API_SECRET,
+                "order_id": order_id,
+                "amount_kopecks": amount_kopecks,
+                "game_id": game_id,
+                "user_id": user_id,
+                "description": f"Покупка {product['name']} для PUBG Mobile. Игровой ID: {game_id}",
+                "email": "noreply@kotshop241.ru",
+            },
+        ) as resp:
+            logger.info(f"Ответ бэкенда: HTTP {resp.status}")
+            try:
+                data = await resp.json()
+            except Exception as e:
+                raw_text = await resp.text()
+                logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
+                logger.error(f"Сырой ответ: {raw_text[:500]}")
+                await callback.message.answer("Сервер вернул некорректный ответ. Попробуйте позже.")
+                await asyncio.sleep(1)
                 try:
-                    data = await resp.json()
-                except Exception as e:
-                    raw_text = await resp.text()
-                    logger.error(f"Не удалось распарсить JSON от бэкенда: {e}")
-                    logger.error(f"Сырой ответ: {raw_text[:500]}")
-                    await callback.message.answer("Сервер вернул некорректный ответ. Попробуйте позже.")
-                    await asyncio.sleep(1)
-                    try:
-                        await callback.message.delete()
-                    except Exception:
-                        pass
-                    await callback.answer()
-                    return
+                    await callback.message.delete()
+                except Exception:
+                    pass
+                await callback.answer()
+                return
 
         logger.info(f"Тело ответа бэкенда: {data}")
 
@@ -1041,10 +1117,14 @@ async def main():
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
     load_pending_from_file()
-    load_balance()  # ─── БАЛАНС: загрузка при старте ───
+    load_balance()
 
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
+
+    # ─── НОВОЕ: закрываем HTTP-сессию при остановке ───
+    if http_session and not http_session.closed:
+        await http_session.close()
 
 
 if __name__ == "__main__":
