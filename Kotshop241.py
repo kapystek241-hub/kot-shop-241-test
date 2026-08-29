@@ -29,6 +29,17 @@ VPS_API_URL = os.getenv("VPS_API_URL")
 API_SECRET = os.getenv("API_SECRET", "change-me")
 REVIEW_CHAT_ID = os.getenv("REVIEW_CHAT_ID", "")
 
+# ─── БАЛАНС: список ID администраторов (через запятую в .env) ───
+ADMIN_IDS = set()
+_admin_ids_raw = os.getenv("ADMIN_IDS", "")
+if _admin_ids_raw:
+    ADMIN_IDS = {int(x.strip()) for x in _admin_ids_raw.split(",") if x.strip().isdigit()}
+logger.info(f"ADMIN_IDS: {ADMIN_IDS if ADMIN_IDS else '(не заданы)'}")
+
+# ─── БАЛАНС: глобальная переменная и файл ───
+kotshop_balance: float | None = None  # None = лимит не задан (покупки не ограничены)
+BALANCE_FILE = os.getenv("BALANCE_FILE", "kotshop_balance.json")
+
 if not all([BOT_TOKEN, VPS_API_URL]):
     raise ValueError("Не заданы переменные окружения: BOT_TOKEN, VPS_API_URL")
 
@@ -146,6 +157,13 @@ REVIEW_WRITE_TEXT = (
     "обратную связь! 💬"
 )
 
+# ─── БАЛАНС: сообщение при нехватке средств ───
+BALANCE_INSUFFICIENT_TEXT = (
+    "Сейчас на балансе недостаточно средств для отправки товара. "
+    "Вы можете дождаться обновления на следующий день или обратиться в поддержку — "
+    "мы отправим товар на ваш аккаунт вручную."
+)
+
 
 # ─── Файл для сохранения ожидающих платежей ───
 PENDING_FILE = os.getenv("PENDING_FILE", "pending_payments.json")
@@ -182,6 +200,28 @@ def load_pending_from_file():
         logger.info(f"Файл {PENDING_FILE} не найден — стартуем с пустым списком")
     except Exception as e:
         logger.error(f"Не удалось загрузить pending_payments из файла: {e}")
+
+
+# ─── БАЛАНС: сохранение и загрузка ───
+def save_balance():
+    try:
+        with open(BALANCE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"balance": kotshop_balance}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Не удалось сохранить баланс в файл: {e}")
+
+
+def load_balance():
+    global kotshop_balance
+    try:
+        with open(BALANCE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        kotshop_balance = data.get("balance")
+        logger.info(f"Баланс загружен из файла: {kotshop_balance}")
+    except FileNotFoundError:
+        logger.info(f"Файл баланса {BALANCE_FILE} не найден — стартуем без лимита")
+    except Exception as e:
+        logger.error(f"Не удалось загрузить баланс из файла: {e}")
 
 
 # ─── Клавиатуры ───
@@ -226,7 +266,6 @@ def kb_pubg_products():
         product = PRODUCTS[key]
         b.button(text=f"UC {product['name'].split(' ')[0]} — {product['price']}₽", callback_data=f"pubg_prod:{key}")
     b.button(text="Назад", callback_data="back_pubg")
-    # 8 рядов по 2 кнопки + 1 кнопка (4510 UC) + Назад
     b.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
     return b.as_markup()
 
@@ -390,6 +429,16 @@ async def check_payments_loop():
 
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
 
+                # ─── БАЛАНС: списание стоимости заказа ───
+                global kotshop_balance
+                if kotshop_balance is not None:
+                    price = info.get("amount_kopecks", 0) / 100
+                    kotshop_balance -= price
+                    if kotshop_balance < 0:
+                        kotshop_balance = 0
+                    save_balance()
+                    logger.info(f"Баланс списан на {price}₽, остаток: {kotshop_balance}₽ (заказ {order_id})")
+
                 deliveries = info.get("deliveries", ["60_uc"])
                 game_id = info.get("game_id", "")
                 delivery_user_id = info.get("user_id", 0)
@@ -449,6 +498,44 @@ async def answer_and_delete(callback, text, reply_markup=None):
 async def cmd_start(message):
     logger.info(f"/start от user_id={message.from_user.id}, username={message.from_user.username}")
     await message.answer(WELCOME_TEXT, reply_markup=kb_start())
+
+
+# ─── БАЛАНС: команда установки баланса (KotShopBalans=5000) ───
+@dp.message(F.text.startswith("KotShopBalans="), StateFilter(None))
+async def cmd_set_balance(message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return  # молча игнорируем не-админов
+
+    try:
+        value = float(message.text.split("=", 1)[1].strip())
+    except (ValueError, IndexError):
+        await message.answer("❌ Неверный формат. Пример: `KotShopBalans=5000`")
+        return
+
+    if value < 0:
+        await message.answer("❌ Баланс не может быть отрицательным.")
+        return
+
+    global kotshop_balance
+    kotshop_balance = value
+    save_balance()
+    logger.info(f"Админ {message.from_user.id} установил баланс: {kotshop_balance}₽")
+    await message.answer(
+        f"✅ Баланс установлен: {kotshop_balance}₽\n"
+        f"Пользователи могут покупать товары, пока общая сумма не достигнет этого значения."
+    )
+
+
+# ─── БАЛАНС: команда проверки баланса (KotShopSee) ───
+@dp.message(F.text == "KotShopSee", StateFilter(None))
+async def cmd_see_balance(message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return  # молча игнорируем не-админов
+
+    if kotshop_balance is None:
+        await message.answer("📊 Баланс не задан — лимит отключён (покупки не ограничены).")
+    else:
+        await message.answer(f"📊 Текущий остаток баланса: {kotshop_balance}₽")
 
 
 @dp.message(F.text == "тест", StateFilter(None))
@@ -525,7 +612,7 @@ async def cb_back_menu(callback, state: FSMContext):
     await callback.answer()
 
 
-# ── PUBG Mobile ──
+# ── PubG Mobile ──
 @dp.callback_query(F.data == "pubg")
 async def cb_pubg(callback, state: FSMContext):
     await state.clear()
@@ -625,6 +712,20 @@ async def cb_confirm_yes(callback, state: FSMContext):
     amount_kopecks = product["amount_kopecks"]
     total_price = product["price"]
     deliveries = product["deliveries"]
+
+    # ─── БАЛАНС: проверка остатка перед созданием платежа ───
+    if kotshop_balance is not None and total_price > kotshop_balance:
+        logger.info(
+            f"Отказ в покупке user_id={user_id}: товар {total_price}₽ > баланс {kotshop_balance}₽"
+        )
+        await callback.message.answer(BALANCE_INSUFFICIENT_TEXT)
+        await asyncio.sleep(1)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.answer()
+        return
 
     logger.info(
         f"Создание платежа: user_id={user_id}, game_id={game_id}, "
@@ -940,6 +1041,7 @@ async def main():
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
     load_pending_from_file()
+    load_balance()  # ─── БАЛАНС: загрузка при старте ───
 
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
