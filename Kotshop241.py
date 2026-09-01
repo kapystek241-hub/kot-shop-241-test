@@ -28,7 +28,13 @@ logger = logging.getLogger("kotshop-bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VPS_API_URL = os.getenv("VPS_API_URL")
 API_SECRET = os.getenv("API_SECRET", "change-me")
-REVIEW_CHAT_ID = os.getenv("REVIEW_CHAT_ID", "")
+
+# ─── Группа отзывов ───
+_review_chat_raw = os.getenv("REVIEW_CHAT_ID", "@otzivkotshop241")
+try:
+    REVIEW_CHAT_ID = int(_review_chat_raw)
+except ValueError:
+    REVIEW_CHAT_ID = _review_chat_raw
 
 # ─── БАЛАНС: список ID администраторов (через запятую в .env) ───
 ADMIN_IDS = set()
@@ -51,7 +57,7 @@ logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ─── НОВОЕ: глобальный HTTP-сессия для переиспользования соединений ───
+# ─── Глобальная HTTP-сессия для переиспользования соединений ───
 http_session: aiohttp.ClientSession | None = None
 
 
@@ -65,18 +71,23 @@ async def get_http_session() -> aiohttp.ClientSession:
     return http_session
 
 
-# ─── ИЗМЕНЕНО: Каталог товаров (+1% к цене) ───
-PRICE_MARKUP = 1.01  # накрутка 1%
+# ─── Каталог товаров ───
+PRICE_MARKUP = 1.01  # накрутка 1% для недоступных товаров (на будущее)
 
 def _apply_markup(price: int) -> int:
     """Применяет 1% наценки и округляет вверх до целого рубля."""
     return math.ceil(price * PRICE_MARKUP)
 
+# ─── Список товаров, доступных для покупки ───
+ALLOWED_PRODUCTS = {"60uc", "120uc", "180uc", "240uc"}
+
 PRODUCTS = {
-    "60uc":   {"name": "60 UC",   "price": _apply_markup(82),   "amount_kopecks": _apply_markup(82)   * 100, "deliveries": ["60_uc"]},
-    "120uc":  {"name": "120 UC",  "price": _apply_markup(164),  "amount_kopecks": _apply_markup(164)  * 100, "deliveries": ["60_uc", "60_uc"]},
-    "180uc":  {"name": "180 UC",  "price": _apply_markup(246),  "amount_kopecks": _apply_markup(246)  * 100, "deliveries": ["60_uc", "60_uc", "60_uc"]},
-    "240uc":  {"name": "240 UC",  "price": _apply_markup(328),  "amount_kopecks": _apply_markup(328)  * 100, "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
+    # ── Доступные товары: фиксированные цены ──
+    "60uc":   {"name": "60 UC",   "price": 85,  "amount_kopecks": 85  * 100, "deliveries": ["60_uc"]},
+    "120uc":  {"name": "120 UC",  "price": 171, "amount_kopecks": 171 * 100, "deliveries": ["60_uc", "60_uc"]},
+    "180uc":  {"name": "180 UC",  "price": 258, "amount_kopecks": 258 * 100, "deliveries": ["60_uc", "60_uc", "60_uc"]},
+    "240uc":  {"name": "240 UC",  "price": 345, "amount_kopecks": 345 * 100, "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
+    # ── Недоступные товары: цены с наценкой (на будущее) ──
     "325uc":  {"name": "325 UC",  "price": _apply_markup(410),  "amount_kopecks": _apply_markup(410)  * 100, "deliveries": ["325_uc"]},
     "385uc":  {"name": "385 UC",  "price": _apply_markup(502),  "amount_kopecks": _apply_markup(502)  * 100, "deliveries": ["325_uc", "60_uc"]},
     "445uc":  {"name": "445 UC",  "price": _apply_markup(575),  "amount_kopecks": _apply_markup(575)  * 100, "deliveries": ["60_uc", "60_uc", "325_uc"]},
@@ -126,9 +137,9 @@ POLICY_TEXT = (
     "Магазин KotShop241 является официальным продавцом виртуальных товаров и осуществляет "
     "все расчёты в строгом соответствии с действующим законодательством Российской Федерации, "
     "включая требования Федерального закона «О национальной платёжной системе» и иные "
-    "нормативно‑правовые акты, регулирующие оборот цифровых товаров и проведение платежей.\n\n"
+    "нормативно-правовые акты, регулирующие оборот цифровых товаров и проведение платежей.\n\n"
     "Реализация товаров осуществляется исключительно в рамках заключённого публичного "
-    "договора‑оферты, размещённого на официальном ресурсе магазина. Приобретение игровой "
+    "договора-оферты, размещённого на официальном ресурсе магазина. Приобретение игровой "
     "валюты, игр и иных виртуальных товаров подтверждает согласие покупателя с условиями "
     "оферты и правилами работы магазина.\n\n"
     "Любые действия, направленные на нарушение установленных правил, в том числе попытки "
@@ -177,14 +188,26 @@ REVIEW_WRITE_TEXT = (
     "обратную связь! 💬"
 )
 
-# ─── БАЛАНС: сообщение при нехватке средств ───
 BALANCE_INSUFFICIENT_TEXT = (
     "Сейчас на балансе недостаточно средств для отправки товара. "
     "Вы можете дождаться обновления на следующий день или обратиться в поддержку — "
     "мы отправим товар на ваш аккаунт вручную."
 )
 
-# ─── НОВОЕ: наборы ключевых слов для текстовых команд ───
+PRODUCT_UNAVAILABLE_TEXT = (
+    "На данный момент доступно пополнение следующих товаров:\n"
+    "60, 120, 180, 240 UC\n\n"
+    "Причина, проблема со стороны поставщика, как только ситуация исправится — "
+    "объявлю об этом в телеграмм канале."
+)
+
+POPULARITY_TEXT = (
+    "На данный момент раздел в разработке, план на разработку:\n"
+    "Популярность можно будет получить от других покупателей в виде заработка, "
+    "о подаче заявки в виде продавца популярности для PUBG Mobile можно будет "
+    "обратиться после создания раздела и после объявления в телеграмм канале."
+)
+
 MENU_KW = {"меню"}
 BUY_KW = {"купить", "закупиться", "товар"}
 PUBG_KW = {"пабг", "пабджи", "pubg"}
@@ -254,21 +277,21 @@ def load_balance():
         logger.error(f"Не удалось загрузить баланс из файла: {e}")
 
 
-# ─── ИЗМЕНЕНО: Кэшированные клавиатуры ───
-# Статические клавиатуры собираются один раз при старте и переиспользуются.
-
-_kb_start:       object = None
-_kb_menu:        object = None
-_kb_buy:         object = None
-_kb_pubg:        object = None
-_kb_pubg_products: object = None
-_kb_pubg_other:  object = None
-_kb_back_to_menu: object = None
-_kb_policy:      object = None
-_kb_support:     object = None
-_kb_review:      object = None
-_kb_review_rating: object = None
-_kb_review_confirm: object = None
+# ─── Кэшированные клавиатуры ───
+_kb_start:            object = None
+_kb_menu:             object = None
+_kb_buy:              object = None
+_kb_pubg:             object = None
+_kb_pubg_products:    object = None
+_kb_pubg_other:       object = None
+_kb_back_to_menu:     object = None
+_kb_policy:           object = None
+_kb_support:          object = None
+_kb_review:           object = None
+_kb_review_rating:    object = None
+_kb_review_confirm:   object = None
+_kb_unavailable_back: object = None
+_kb_popularity_back:  object = None
 
 
 def init_keyboards():
@@ -276,6 +299,7 @@ def init_keyboards():
     global _kb_start, _kb_menu, _kb_buy, _kb_pubg, _kb_pubg_products
     global _kb_pubg_other, _kb_back_to_menu, _kb_policy, _kb_support
     global _kb_review, _kb_review_rating, _kb_review_confirm
+    global _kb_unavailable_back, _kb_popularity_back
 
     # ── kb_start ──
     b = InlineKeyboardBuilder()
@@ -288,9 +312,10 @@ def init_keyboards():
     b = InlineKeyboardBuilder()
     b.button(text="Купить", callback_data="buy")
     b.button(text="Поддержка", callback_data="support")
+    b.button(text="Отзывы", url="https://t.me/otzivkotshop241")
     b.button(text="Турнир", callback_data="tournament")
     b.button(text="Назад", callback_data="back_start")
-    b.adjust(2, 1, 1)
+    b.adjust(2, 1, 1, 1)
     _kb_menu = b.as_markup()
 
     # ── kb_buy ──
@@ -319,6 +344,7 @@ def init_keyboards():
 
     # ── kb_pubg_other ──
     b = InlineKeyboardBuilder()
+    b.button(text="Популярность", callback_data="popularity")
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(1)
     _kb_pubg_other = b.as_markup()
@@ -366,10 +392,22 @@ def init_keyboards():
     b.adjust(1)
     _kb_review_confirm = b.as_markup()
 
+    # ── kb_unavailable_back — кнопка "Назад" для недоступных товаров ──
+    b = InlineKeyboardBuilder()
+    b.button(text="Назад", callback_data="pubg_buy_uc")
+    b.adjust(1)
+    _kb_unavailable_back = b.as_markup()
+
+    # ── kb_popularity_back — кнопка "Назад" для раздела "Популярность" ──
+    b = InlineKeyboardBuilder()
+    b.button(text="Назад", callback_data="pubg_other")
+    b.adjust(1)
+    _kb_popularity_back = b.as_markup()
+
     logger.info("Все статические клавиатуры собраны и закешированы")
 
 
-# kb_confirm — единственная динамическая клавиатура, строится на лету
+# kb_confirm — единственная динамическая клавиатура
 def kb_confirm(game_id: str, product_key: str):
     b = InlineKeyboardBuilder()
     b.button(text="Все верно", callback_data=f"confirm_yes:{game_id}:{product_key}")
@@ -379,7 +417,7 @@ def kb_confirm(game_id: str, product_key: str):
     return b.as_markup()
 
 
-# ─── НОВОЕ: Запрос статуса платежа к VPS (через общий HTTP-сессия) ───
+# ─── Запрос статуса платежа к VPS ───
 async def vps_check_payment(order_id: str) -> bool | None:
     try:
         session = await get_http_session()
@@ -398,7 +436,7 @@ async def vps_check_payment(order_id: str) -> bool | None:
         return None
 
 
-# ─── НОВОЕ: Отправка заявки на доставку UC (через общий HTTP-сессия) ───
+# ─── Отправка заявки на доставку UC ───
 async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: int, offer_id: str) -> bool:
     try:
         session = await get_http_session()
@@ -424,41 +462,47 @@ async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: 
         return False
 
 
-# ─── Отправка отзыва в группу ───
-async def send_review_to_group(text: str):
+# ─── ИЗМЕНЕНО: Пересылка отзыва в группу (вместо send_message) ───
+async def forward_review_to_group(from_chat_id: int, message_id: int):
+    """Пересылает сообщение пользователя в группу отзывов."""
     if not REVIEW_CHAT_ID:
         logger.warning("REVIEW_CHAT_ID не задан — отзыв не отправлен в группу")
         return
     try:
-        await bot.send_message(REVIEW_CHAT_ID, text)
-        logger.info("Отзыв отправлен в группу отзывов")
+        await bot.forward_message(REVIEW_CHAT_ID, from_chat_id, message_id)
+        logger.info(f"Сообщение {message_id} из чата {from_chat_id} переслано в группу отзывов")
     except Exception as e:
-        logger.error(f"Не удалось отправить отзыв в группу: {e}")
+        logger.error(f"Не удалось переслать отзыв в группу: {e}")
 
 
-# ─── НОВОЕ: обработка одного оплаченного заказа (доставка + уведомление) ───
+# ─── Обработка одного оплаченного заказа ───
 async def process_paid_order(order_id: str, info: dict):
-    """Доставка и уведомление по одному подтверждённому заказу — работает конкурентно."""
+    """Отправка товара, списание баланса и уведомление по одному подтверждённому заказу."""
     deliveries = info.get("deliveries", ["60_uc"])
     game_id = info.get("game_id", "")
     delivery_user_id = info.get("user_id", 0)
+    amount_kopecks = info.get("amount_kopecks", 0)
 
-    # Параллельная доставка всех частей заказа
+    # Параллельная отправка всех частей заказа
     tasks = [
         vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
         for i, offer_id in enumerate(deliveries)
     ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            logger.error(f"Доставка {i+1}/{len(deliveries)} для {order_id} — ошибка: {result}")
-        elif result:
-            logger.info(f"Доставка {i+1}/{len(deliveries)} для {order_id} — успешно")
-        else:
-            logger.error(f"Доставка {i+1}/{len(deliveries)} для {order_id} — НЕ удалась")
+    logger.info(f"Отправка товара для {order_id} завершена (без проверки ошибок)")
 
-    # Уведомление пользователя
+    # ─── Списание баланса ───
+    global kotshop_balance
+    if kotshop_balance is not None:
+        price = amount_kopecks / 100
+        kotshop_balance -= price
+        if kotshop_balance < 0:
+            kotshop_balance = 0
+        save_balance()
+        logger.info(f"Баланс списан на {price}₽, остаток: {kotshop_balance}₽ (заказ {order_id})")
+
+    # Уведомление пользователя об успехе
     notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
     await asyncio.sleep(2)
     try:
@@ -479,7 +523,37 @@ async def process_paid_order(order_id: str, info: dict):
     )
 
 
-# ─── НОВОЕ: фоновая задача — конкурентная проверка и обработка платежей ───
+# ─── НОВОЕ: Тестовая обработка «оплаченного» заказа (без доставки) ───
+async def process_paid_order_test(chat_id: int, user_id: int):
+    """
+    Имитирует полную логику process_paid_order, но НЕ отправляет товар на VPS.
+    Списание баланса НЕ производится — это тест.
+    Удаляет сообщение-«кнопку оплаты» (если есть), показывает «Оплата выполнена»,
+    затем форму отзыва. Всё как при реальной оплате.
+    """
+    test_order_id = f"test-{user_id}-{int(time.time())}"
+    logger.info(f"ТЕСТ: запуск тестовой логики оплаты для user_id={user_id}, order_id={test_order_id}")
+
+    # ── Показ «Оплата выполнена» (как в process_paid_order) ──
+    notify_msg = await bot.send_message(chat_id, "Оплата выполнена")
+    await asyncio.sleep(2)
+    try:
+        await notify_msg.delete()
+    except Exception as e:
+        logger.warning(f"ТЕСТ: не удалось удалить сообщение «Оплата выполнена»: {e}")
+
+    await asyncio.sleep(1)
+
+    # ── Показ формы отзыва (как в process_paid_order) ──
+    await bot.send_message(
+        chat_id,
+        REVIEW_PROMPT_TEXT,
+        reply_markup=_kb_review,
+    )
+    logger.info(f"ТЕСТ: форма отзыва показана для user_id={user_id}")
+
+
+# ─── Фоновая задача — проверка и обработка платежей ───
 async def check_payments_loop():
     logger.info("Запущен цикл проверки платежей (интервал 15 сек, таймаут 600 сек)")
     while True:
@@ -488,7 +562,7 @@ async def check_payments_loop():
         to_remove = []
         to_check = []
 
-        # 1) Разделаем на истёкшие и активные
+        # 1) Разделяем на истёкшие и активные
         for order_id, info in list(pending_payments.items()):
             if now - info["created_at"] > PAYMENT_TIMEOUT:
                 logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
@@ -517,17 +591,6 @@ async def check_payments_loop():
                 if paid is None or not paid:
                     continue
                 logger.info(f"Платёж {order_id} подтверждён (VPS: paid=true)")
-
-                # Списываем баланс последовательно
-                global kotshop_balance
-                if kotshop_balance is not None:
-                    price = info.get("amount_kopecks", 0) / 100
-                    kotshop_balance -= price
-                    if kotshop_balance < 0:
-                        kotshop_balance = 0
-                    save_balance()
-                    logger.info(f"Баланс списан на {price}₽, остаток: {kotshop_balance}₽ (заказ {order_id})")
-
                 confirmed.append((order_id, info))
                 to_remove.append(order_id)
 
@@ -562,7 +625,7 @@ async def cmd_start(message):
     await message.answer(WELCOME_TEXT, reply_markup=_kb_start)
 
 
-# ─── БАЛАНС: команда установки баланса (KotShopBalans=5000) ───
+# ─── БАЛАНС: команда установки баланса ───
 @dp.message(F.text.startswith("KotShopBalans="), StateFilter(None))
 async def cmd_set_balance(message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -588,7 +651,7 @@ async def cmd_set_balance(message, state: FSMContext):
     )
 
 
-# ─── БАЛАНС: команда проверки баланса (KotShopSee) ───
+# ─── БАЛАНС: команда проверки баланса ───
 @dp.message(F.text == "KotShopSee", StateFilter(None))
 async def cmd_see_balance(message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -600,7 +663,7 @@ async def cmd_see_balance(message, state: FSMContext):
         await message.answer(f"📊 Текущий остаток баланса: {kotshop_balance}₽")
 
 
-# ─── НОВОЕ: текстовые команды по ключевым словам ───
+# ─── Текстовые команды по ключевым словам ───
 
 @dp.message(lambda m: m.text and m.text.lower().strip() in MENU_KW, StateFilter(None))
 async def kw_menu(message, state: FSMContext):
@@ -648,6 +711,17 @@ async def cmd_test_purchase(message, state: FSMContext):
         logger.warning(f"Не удалось удалить тестовое сообщение «Оплата выполнена»: {e}")
 
     await message.answer(REVIEW_PROMPT_TEXT, reply_markup=_kb_review)
+
+
+# ─── НОВОЕ: Тестовый блок для админа — полная логика после оплаты без доставки ───
+@dp.message(F.text == "Тест", StateFilter(None))
+async def cmd_test_full_flow(message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    logger.info(f"ТЕСТ (полная логика): запуск от админа user_id={message.from_user.id}")
+    await state.clear()
+    await process_paid_order_test(message.chat.id, message.from_user.id)
 
 
 @dp.message(F.text == "Отзыв", StateFilter(None))
@@ -738,11 +812,14 @@ async def cb_pubg_buy_uc(callback, state: FSMContext):
 @dp.callback_query(F.data == "pubg_other")
 async def cb_pubg_other(callback, state: FSMContext):
     await state.clear()
-    await answer_and_delete(
-        callback,
-        "На данный момент этот раздел в разработке",
-        _kb_pubg_other,
-    )
+    await answer_and_delete(callback, "Раздел «Другие товары»", _kb_pubg_other)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "popularity")
+async def cb_popularity(callback, state: FSMContext):
+    await state.clear()
+    await answer_and_delete(callback, POPULARITY_TEXT, _kb_popularity_back)
     await callback.answer()
 
 
@@ -760,6 +837,17 @@ async def cb_pubg_product(callback, state: FSMContext):
     if product_key not in PRODUCTS:
         logger.warning(f"Неизвестный товар: {product_key}")
         await callback.answer("Товар не найден")
+        return
+
+    # Проверка, доступен ли товар для покупки
+    if product_key not in ALLOWED_PRODUCTS:
+        await callback.message.answer(PRODUCT_UNAVAILABLE_TEXT, reply_markup=_kb_unavailable_back)
+        await asyncio.sleep(1)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.answer()
         return
 
     await state.set_state(OrderFlow.waiting_for_id)
@@ -797,7 +885,7 @@ async def process_game_id(message, state: FSMContext):
     )
 
 
-# ── Подтверждение заказа → создание ОДНОГО платежа ──
+# ── Подтверждение заказа → создание платежа ──
 @dp.callback_query(F.data.startswith("confirm_yes"))
 async def cb_confirm_yes(callback, state: FSMContext):
     await state.clear()
@@ -992,6 +1080,7 @@ async def cb_review_start(callback, state: FSMContext):
     await callback.answer()
 
 
+# ── ИЗМЕНЕНО: сохраняем message_id сообщения с оценкой ──
 @dp.message(OrderFlow.waiting_for_rating)
 async def process_rating(message, state: FSMContext):
     text = message.text.strip()
@@ -1002,7 +1091,12 @@ async def process_rating(message, state: FSMContext):
     rating = int(text)
     stars = "⭐" * rating
     await state.set_state(None)
-    await state.set_data({"rating": rating})
+    # Сохраняем оценку и ID исходного сообщения пользователя для пересылки
+    await state.update_data({
+        "rating": rating,
+        "rating_message_id": message.message_id,
+        "rating_chat_id": message.chat.id,
+    })
     await message.answer(
         f"{stars}\n\nЗдесь будет ваш отзыв, напишите его",
         reply_markup=_kb_review_rating
@@ -1021,6 +1115,7 @@ async def cb_review_write(callback, state: FSMContext):
     await callback.answer()
 
 
+# ── ИЗМЕНЕНО: сохраняем message_id сообщения с текстом отзыва ──
 @dp.message(OrderFlow.waiting_for_review_text)
 async def process_review_text(message, state: FSMContext):
     data = await state.get_data()
@@ -1029,13 +1124,20 @@ async def process_review_text(message, state: FSMContext):
     review_text = message.text.strip()
 
     await state.set_state(None)
-    await state.set_data({"rating": rating, "review_text": review_text})
+    # Сохраняем текст отзыва и ID исходного сообщения для пересылки
+    await state.update_data({
+        "rating": rating,
+        "review_text": review_text,
+        "review_message_id": message.message_id,
+        "review_chat_id": message.chat.id,
+    })
     await message.answer(
         f"{stars}\n\n{review_text}",
         reply_markup=_kb_review_confirm
     )
 
 
+# ── ИЗМЕНЕНО: пересылка сообщений вместо отправки текста ──
 @dp.callback_query(F.data == "review_send")
 async def cb_review_send(callback, state: FSMContext):
     data = await state.get_data()
@@ -1043,8 +1145,17 @@ async def cb_review_send(callback, state: FSMContext):
     review_text = data.get("review_text", "")
     stars = "⭐" * rating
 
-    full_review = f"{stars}\n\n{review_text}"
-    await send_review_to_group(full_review)
+    # Пересылаем исходное сообщение с оценкой
+    rating_msg_id = data.get("rating_message_id")
+    rating_chat_id = data.get("rating_chat_id")
+    if rating_msg_id and rating_chat_id:
+        await forward_review_to_group(rating_chat_id, rating_msg_id)
+
+    # Пересылаем исходное сообщение с текстом отзыва
+    review_msg_id = data.get("review_message_id")
+    review_chat_id = data.get("review_chat_id")
+    if review_msg_id and review_chat_id:
+        await forward_review_to_group(review_chat_id, review_msg_id)
 
     await state.clear()
     await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=_kb_menu)
@@ -1061,7 +1172,8 @@ async def cb_review_edit_text(callback, state: FSMContext):
     data = await state.get_data()
     rating = data.get("rating", 5)
     await state.set_state(OrderFlow.waiting_for_review_text)
-    await state.set_data({"rating": rating})
+    # Сохраняем оценку и её message_id, текст отзыва будет перезаписан
+    await state.update_data({"rating": rating})
     await callback.message.answer(REVIEW_WRITE_TEXT)
     await asyncio.sleep(1)
     try:
@@ -1076,7 +1188,8 @@ async def cb_review_change_rating(callback, state: FSMContext):
     data = await state.get_data()
     review_text = data.get("review_text", "")
     await state.set_state(OrderFlow.waiting_for_rating)
-    await state.set_data({"review_text": review_text})
+    # Сохраняем текст отзыва и его message_id, оценка будет перезаписана
+    await state.update_data({"review_text": review_text})
     await callback.message.answer(REVIEW_RATING_TEXT)
     await asyncio.sleep(1)
     try:
@@ -1098,13 +1211,19 @@ async def cb_review_to_menu(callback, state: FSMContext):
     await callback.answer()
 
 
+# ── ИЗМЕНЕНО: пересылка только сообщения с оценкой ──
 @dp.callback_query(F.data == "review_send_stars_only")
 async def cb_review_send_stars_only(callback, state: FSMContext):
     data = await state.get_data()
     rating = data.get("rating", 5)
     stars = "⭐" * rating
 
-    await send_review_to_group(stars)
+    # Пересылаем исходное сообщение с оценкой
+    rating_msg_id = data.get("rating_message_id")
+    rating_chat_id = data.get("rating_chat_id")
+    if rating_msg_id and rating_chat_id:
+        await forward_review_to_group(rating_chat_id, rating_msg_id)
+
     await state.clear()
     await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=_kb_menu)
     await asyncio.sleep(1)
@@ -1136,7 +1255,6 @@ async def main():
     logger.info(f"VPS_API_URL = {VPS_API_URL}")
     logger.info(f"REVIEW_CHAT_ID = {REVIEW_CHAT_ID if REVIEW_CHAT_ID else '(не задан)'}")
 
-    # ─── ИЗМЕНЕНО: инициализация клавиатур до старта поллинга ───
     init_keyboards()
 
     load_pending_from_file()
@@ -1145,7 +1263,6 @@ async def main():
     asyncio.create_task(check_payments_loop())
     await dp.start_polling(bot)
 
-    # ─── НОВОЕ: закрываем HTTP-сессию при остановке ───
     if http_session and not http_session.closed:
         await http_session.close()
 
