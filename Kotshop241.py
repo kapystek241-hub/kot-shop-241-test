@@ -57,7 +57,7 @@ logger.info(f"REVIEW_CHAT_ID задан: {'да' if REVIEW_CHAT_ID else 'НЕТ'
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ─── Глобальная HTTP-сессия для переиспользования соединений ───
+# ─── Глобальная HTTP-сессия ───
 http_session: aiohttp.ClientSession | None = None
 
 
@@ -72,22 +72,18 @@ async def get_http_session() -> aiohttp.ClientSession:
 
 
 # ─── Каталог товаров ───
-PRICE_MARKUP = 1.01  # накрутка 1% для недоступных товаров (на будущее)
+PRICE_MARKUP = 1.01
 
 def _apply_markup(price: int) -> int:
-    """Применяет 1% наценки и округляет вверх до целого рубля."""
     return math.ceil(price * PRICE_MARKUP)
 
-# ─── Список товаров, доступных для покупки ───
 ALLOWED_PRODUCTS = {"60uc", "120uc", "180uc", "240uc"}
 
 PRODUCTS = {
-    # ── Доступные товары: фиксированные цены ──
     "60uc":   {"name": "60 UC",   "price": 85,  "amount_kopecks": 85  * 100, "deliveries": ["60_uc"]},
     "120uc":  {"name": "120 UC",  "price": 171, "amount_kopecks": 171 * 100, "deliveries": ["60_uc", "60_uc"]},
     "180uc":  {"name": "180 UC",  "price": 258, "amount_kopecks": 258 * 100, "deliveries": ["60_uc", "60_uc", "60_uc"]},
     "240uc":  {"name": "240 UC",  "price": 345, "amount_kopecks": 345 * 100, "deliveries": ["60_uc", "60_uc", "60_uc", "60_uc"]},
-    # ── Недоступные товары: цены с наценкой (на будущее) ──
     "325uc":  {"name": "325 UC",  "price": _apply_markup(410),  "amount_kopecks": _apply_markup(410)  * 100, "deliveries": ["325_uc"]},
     "385uc":  {"name": "385 UC",  "price": _apply_markup(502),  "amount_kopecks": _apply_markup(502)  * 100, "deliveries": ["325_uc", "60_uc"]},
     "445uc":  {"name": "445 UC",  "price": _apply_markup(575),  "amount_kopecks": _apply_markup(575)  * 100, "deliveries": ["60_uc", "60_uc", "325_uc"]},
@@ -301,14 +297,12 @@ def init_keyboards():
     global _kb_review, _kb_review_rating, _kb_review_confirm
     global _kb_unavailable_back, _kb_popularity_back
 
-    # ── kb_start ──
     b = InlineKeyboardBuilder()
     b.button(text="Меню", callback_data="menu")
     b.button(text="Политика компании", callback_data="oferta")
     b.adjust(2)
     _kb_start = b.as_markup()
 
-    # ── kb_menu ──
     b = InlineKeyboardBuilder()
     b.button(text="Купить", callback_data="buy")
     b.button(text="Поддержка", callback_data="support")
@@ -318,14 +312,12 @@ def init_keyboards():
     b.adjust(2, 1, 1, 1)
     _kb_menu = b.as_markup()
 
-    # ── kb_buy ──
     b = InlineKeyboardBuilder()
     b.button(text="PUBG Mobile", callback_data="pubg")
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
     _kb_buy = b.as_markup()
 
-    # ── kb_pubg ──
     b = InlineKeyboardBuilder()
     b.button(text="Купить UC по ID", callback_data="pubg_buy_uc")
     b.button(text="Другие товары", callback_data="pubg_other")
@@ -333,7 +325,6 @@ def init_keyboards():
     b.adjust(1)
     _kb_pubg = b.as_markup()
 
-    # ── kb_pubg_products ──
     b = InlineKeyboardBuilder()
     for key in PRODUCT_GRID:
         product = PRODUCTS[key]
@@ -342,40 +333,34 @@ def init_keyboards():
     b.adjust(2, 2, 2, 2, 2, 2, 2, 2, 1, 1)
     _kb_pubg_products = b.as_markup()
 
-    # ── kb_pubg_other ──
     b = InlineKeyboardBuilder()
     b.button(text="Популярность", callback_data="popularity")
     b.button(text="Назад", callback_data="back_pubg")
     b.adjust(1)
     _kb_pubg_other = b.as_markup()
 
-    # ── kb_back_to_menu ──
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
     _kb_back_to_menu = b.as_markup()
 
-    # ── kb_policy ──
     b = InlineKeyboardBuilder()
     b.button(text="Меню", callback_data="menu")
     b.adjust(1)
     _kb_policy = b.as_markup()
 
-    # ── kb_support ──
     b = InlineKeyboardBuilder()
     b.button(text="Поддержка", url="https://t.me/KotShop2415")
     b.button(text="Назад", callback_data="back_menu")
     b.adjust(1)
     _kb_support = b.as_markup()
 
-    # ── kb_review ──
     b = InlineKeyboardBuilder()
     b.button(text="Оценить", callback_data="review_start")
     b.button(text="В меню", callback_data="menu")
     b.adjust(1)
     _kb_review = b.as_markup()
 
-    # ── kb_review_rating ──
     b = InlineKeyboardBuilder()
     b.button(text="Написать отзыв", callback_data="review_write")
     b.button(text="Отправить без текста", callback_data="review_send_stars_only")
@@ -383,7 +368,6 @@ def init_keyboards():
     b.adjust(1)
     _kb_review_rating = b.as_markup()
 
-    # ── kb_review_confirm ──
     b = InlineKeyboardBuilder()
     b.button(text="Отправить", callback_data="review_send")
     b.button(text="Изменить текст", callback_data="review_edit_text")
@@ -392,13 +376,11 @@ def init_keyboards():
     b.adjust(1)
     _kb_review_confirm = b.as_markup()
 
-    # ── kb_unavailable_back — кнопка "Назад" для недоступных товаров ──
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="pubg_buy_uc")
     b.adjust(1)
     _kb_unavailable_back = b.as_markup()
 
-    # ── kb_popularity_back — кнопка "Назад" для раздела "Популярность" ──
     b = InlineKeyboardBuilder()
     b.button(text="Назад", callback_data="pubg_other")
     b.adjust(1)
@@ -407,7 +389,6 @@ def init_keyboards():
     logger.info("Все статические клавиатуры собраны и закешированы")
 
 
-# kb_confirm — единственная динамическая клавиатура
 def kb_confirm(game_id: str, product_key: str):
     b = InlineKeyboardBuilder()
     b.button(text="Все верно", callback_data=f"confirm_yes:{game_id}:{product_key}")
@@ -462,17 +443,47 @@ async def vps_deliver(game_id: str, user_id: int, order_id: str, deliver_index: 
         return False
 
 
-# ─── ИЗМЕНЕНО: Пересылка отзыва в группу (вместо send_message) ───
-async def forward_review_to_group(from_chat_id: int, message_id: int):
-    """Пересылает сообщение пользователя в группу отзывов."""
+# ─── ИСПРАВЛЕНО: Отправка отзыва в группу через send_message ───
+async def send_review_to_group(rating: int, review_text: str = "", user_name: str = "") -> bool:
+    """
+    Отправляет отзыв в группу отзывов через send_message (а не forward_message).
+    Составляет текст отзыва из оценки и текста.
+    """
     if not REVIEW_CHAT_ID:
         logger.warning("REVIEW_CHAT_ID не задан — отзыв не отправлен в группу")
-        return
+        return False
+
+    stars = "⭐" * rating
+
+    # Составляем текст отзыва
+    header = "📝 Новый отзыв\n\n"
+    rating_line = f"Оценка: {rating}/10 {stars}\n"
+
+    if review_text:
+        body = f"Текст отзыва:\n{review_text}\n"
+    else:
+        body = "(без текста)\n"
+
+    if user_name:
+        author = f"\n— @{user_name}" if not user_name.startswith("@") else f"\n— {user_name}"
+    else:
+        author = ""
+
+    full_text = header + rating_line + body + author
+
     try:
-        await bot.forward_message(REVIEW_CHAT_ID, from_chat_id, message_id)
-        logger.info(f"Сообщение {message_id} из чата {from_chat_id} переслано в группу отзывов")
+        await bot.send_message(
+            chat_id=REVIEW_CHAT_ID,
+            text=full_text,
+        )
+        logger.info(f"Отзыв отправлен в группу {REVIEW_CHAT_ID}: rating={rating}, has_text={bool(review_text)}")
+        return True
     except Exception as e:
-        logger.error(f"Не удалось переслать отзыв в группу: {e}")
+        logger.error(
+            f"Не удалось отправить отзыв в группу {REVIEW_CHAT_ID}: "
+            f"{type(e).__name__}: {e}"
+        )
+        return False
 
 
 # ─── Обработка одного оплаченного заказа ───
@@ -483,7 +494,6 @@ async def process_paid_order(order_id: str, info: dict):
     delivery_user_id = info.get("user_id", 0)
     amount_kopecks = info.get("amount_kopecks", 0)
 
-    # Параллельная отправка всех частей заказа
     tasks = [
         vps_deliver(game_id, delivery_user_id, order_id, i + 1, offer_id)
         for i, offer_id in enumerate(deliveries)
@@ -492,7 +502,6 @@ async def process_paid_order(order_id: str, info: dict):
 
     logger.info(f"Отправка товара для {order_id} завершена (без проверки ошибок)")
 
-    # ─── Списание баланса ───
     global kotshop_balance
     if kotshop_balance is not None:
         price = amount_kopecks / 100
@@ -502,7 +511,6 @@ async def process_paid_order(order_id: str, info: dict):
         save_balance()
         logger.info(f"Баланс списан на {price}₽, остаток: {kotshop_balance}₽ (заказ {order_id})")
 
-    # Уведомление пользователя об успехе
     notify_msg = await bot.send_message(info["chat_id"], "Оплата выполнена")
     await asyncio.sleep(2)
     try:
@@ -523,18 +531,11 @@ async def process_paid_order(order_id: str, info: dict):
     )
 
 
-# ─── НОВОЕ: Тестовая обработка «оплаченного» заказа (без доставки) ───
+# ─── Тестовая обработка «оплаченного» заказа (без доставки) ───
 async def process_paid_order_test(chat_id: int, user_id: int):
-    """
-    Имитирует полную логику process_paid_order, но НЕ отправляет товар на VPS.
-    Списание баланса НЕ производится — это тест.
-    Удаляет сообщение-«кнопку оплаты» (если есть), показывает «Оплата выполнена»,
-    затем форму отзыва. Всё как при реальной оплате.
-    """
     test_order_id = f"test-{user_id}-{int(time.time())}"
     logger.info(f"ТЕСТ: запуск тестовой логики оплаты для user_id={user_id}, order_id={test_order_id}")
 
-    # ── Показ «Оплата выполнена» (как в process_paid_order) ──
     notify_msg = await bot.send_message(chat_id, "Оплата выполнена")
     await asyncio.sleep(2)
     try:
@@ -544,7 +545,6 @@ async def process_paid_order_test(chat_id: int, user_id: int):
 
     await asyncio.sleep(1)
 
-    # ── Показ формы отзыва (как в process_paid_order) ──
     await bot.send_message(
         chat_id,
         REVIEW_PROMPT_TEXT,
@@ -562,7 +562,6 @@ async def check_payments_loop():
         to_remove = []
         to_check = []
 
-        # 1) Разделяем на истёкшие и активные
         for order_id, info in list(pending_payments.items()):
             if now - info["created_at"] > PAYMENT_TIMEOUT:
                 logger.info(f"Платёж {order_id} истёк по таймауту (10 мин)")
@@ -581,7 +580,6 @@ async def check_payments_loop():
             else:
                 to_check.append((order_id, info))
 
-        # 2) Конкурентная проверка статусов всех активных платежей
         if to_check:
             check_tasks = [vps_check_payment(oid) for oid, _ in to_check]
             results = await asyncio.gather(*check_tasks)
@@ -594,14 +592,12 @@ async def check_payments_loop():
                 confirmed.append((order_id, info))
                 to_remove.append(order_id)
 
-            # 3) Конкурентная обработка всех подтверждённых заказов
             if confirmed:
                 process_tasks = [
                     process_paid_order(oid, info) for oid, info in confirmed
                 ]
                 await asyncio.gather(*process_tasks, return_exceptions=True)
 
-        # 4) Очистка
         if to_remove:
             for order_id in to_remove:
                 pending_payments.pop(order_id, None)
@@ -713,7 +709,7 @@ async def cmd_test_purchase(message, state: FSMContext):
     await message.answer(REVIEW_PROMPT_TEXT, reply_markup=_kb_review)
 
 
-# ─── НОВОЕ: Тестовый блок для админа — полная логика после оплаты без доставки ───
+# ─── Тестовый блок для админа ───
 @dp.message(F.text == "Тест", StateFilter(None))
 async def cmd_test_full_flow(message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -839,7 +835,6 @@ async def cb_pubg_product(callback, state: FSMContext):
         await callback.answer("Товар не найден")
         return
 
-    # Проверка, доступен ли товар для покупки
     if product_key not in ALLOWED_PRODUCTS:
         await callback.message.answer(PRODUCT_UNAVAILABLE_TEXT, reply_markup=_kb_unavailable_back)
         await asyncio.sleep(1)
@@ -898,7 +893,6 @@ async def cb_confirm_yes(callback, state: FSMContext):
     total_price = product["price"]
     deliveries = product["deliveries"]
 
-    # ─── БАЛАНС: проверка остатка перед созданием платежа ───
     if kotshop_balance is not None and total_price > kotshop_balance:
         logger.info(
             f"Отказ в покупке user_id={user_id}: товар {total_price}₽ > баланс {kotshop_balance}₽"
@@ -1067,9 +1061,14 @@ async def cb_confirm_cancel(callback, state: FSMContext):
     await callback.answer()
 
 
+# ──────────────────────────────────────────────────────────────
 # ── Раздел отзывов ──
+# ──────────────────────────────────────────────────────────────
+
 @dp.callback_query(F.data == "review_start")
 async def cb_review_start(callback, state: FSMContext):
+    """Начало процесса отзыва — запрос оценки."""
+    await state.clear()
     await state.set_state(OrderFlow.waiting_for_rating)
     await callback.message.answer(REVIEW_RATING_TEXT)
     await asyncio.sleep(1)
@@ -1080,9 +1079,13 @@ async def cb_review_start(callback, state: FSMContext):
     await callback.answer()
 
 
-# ── ИЗМЕНЕНО: сохраняем message_id сообщения с оценкой ──
 @dp.message(OrderFlow.waiting_for_rating)
 async def process_rating(message, state: FSMContext):
+    """Обработка оценки от 1 до 10."""
+    if not message.text:
+        await message.answer("❌ Пожалуйста, отправьте число от 1 до 10.")
+        return
+
     text = message.text.strip()
     if not text.isdigit() or not (1 <= int(text) <= 10):
         await message.answer("❌ Пожалуйста, отправьте число от 1 до 10.")
@@ -1090,21 +1093,30 @@ async def process_rating(message, state: FSMContext):
 
     rating = int(text)
     stars = "⭐" * rating
-    await state.set_state(None)
-    # Сохраняем оценку и ID исходного сообщения пользователя для пересылки
+
+    # НЕ вызываем set_state(None) — данные не будут потеряны
+    existing_data = await state.get_data()
+    existing_review_text = existing_data.get("review_text", "")
+
     await state.update_data({
         "rating": rating,
-        "rating_message_id": message.message_id,
-        "rating_chat_id": message.chat.id,
     })
-    await message.answer(
-        f"{stars}\n\nЗдесь будет ваш отзыв, напишите его",
-        reply_markup=_kb_review_rating
-    )
+
+    if existing_review_text:
+        await message.answer(
+            f"{stars}\n\n{existing_review_text}",
+            reply_markup=_kb_review_confirm
+        )
+    else:
+        await message.answer(
+            f"{stars}\n\nЗдесь будет ваш отзыв, напишите его",
+            reply_markup=_kb_review_rating
+        )
 
 
 @dp.callback_query(F.data == "review_write")
 async def cb_review_write(callback, state: FSMContext):
+    """Переход к написанию текста отзыва."""
     await state.set_state(OrderFlow.waiting_for_review_text)
     await callback.message.answer(REVIEW_WRITE_TEXT)
     await asyncio.sleep(1)
@@ -1115,50 +1127,61 @@ async def cb_review_write(callback, state: FSMContext):
     await callback.answer()
 
 
-# ── ИЗМЕНЕНО: сохраняем message_id сообщения с текстом отзыва ──
 @dp.message(OrderFlow.waiting_for_review_text)
 async def process_review_text(message, state: FSMContext):
+    """Обработка текста отзыва."""
+    if not message.text:
+        await message.answer("❌ Пожалуйста, отправьте текст отзыва текстовым сообщением.")
+        return
+
     data = await state.get_data()
     rating = data.get("rating", 5)
     stars = "⭐" * rating
     review_text = message.text.strip()
 
-    await state.set_state(None)
-    # Сохраняем текст отзыва и ID исходного сообщения для пересылки
+    # НЕ вызываем set_state(None)
     await state.update_data({
-        "rating": rating,
         "review_text": review_text,
-        "review_message_id": message.message_id,
-        "review_chat_id": message.chat.id,
     })
+
+    logger.info(f"Отзыв: rating={rating}, text='{review_text[:50]}...'")
+
     await message.answer(
         f"{stars}\n\n{review_text}",
         reply_markup=_kb_review_confirm
     )
 
 
-# ── ИЗМЕНЕНО: пересылка сообщений вместо отправки текста ──
+# ── ИСПРАВЛЕНО: отправка через send_message вместо forward_message ──
 @dp.callback_query(F.data == "review_send")
 async def cb_review_send(callback, state: FSMContext):
+    """Отправка отзыва (оценка + текст) в группу."""
     data = await state.get_data()
+
+    logger.info(f"review_send: данные из state = {data}")
+
     rating = data.get("rating", 5)
     review_text = data.get("review_text", "")
-    stars = "⭐" * rating
 
-    # Пересылаем исходное сообщение с оценкой
-    rating_msg_id = data.get("rating_message_id")
-    rating_chat_id = data.get("rating_chat_id")
-    if rating_msg_id and rating_chat_id:
-        await forward_review_to_group(rating_chat_id, rating_msg_id)
+    # Получаем username пользователя для подписи отзыва
+    user_name = ""
+    if callback.from_user.username:
+        user_name = f"@{callback.from_user.username}"
+    else:
+        user_name = f"id:{callback.from_user.id}"
 
-    # Пересылаем исходное сообщение с текстом отзыва
-    review_msg_id = data.get("review_message_id")
-    review_chat_id = data.get("review_chat_id")
-    if review_msg_id and review_chat_id:
-        await forward_review_to_group(review_chat_id, review_msg_id)
+    # Отправляем отзыв через send_message (не forward_message!)
+    ok = await send_review_to_group(rating, review_text, user_name)
 
-    await state.clear()
-    await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=_kb_menu)
+    if not ok:
+        logger.error("review_send: отправка отзыва в группу неудачна")
+        await callback.message.answer(
+            "❌ Не удалось отправить отзыв. Попробуйте позже или напишите в поддержку."
+        )
+    else:
+        await state.clear()
+        await callback.message.answer("Спасибо за ваш отзыв! 💙", reply_markup=_kb_menu)
+
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -1169,10 +1192,10 @@ async def cb_review_send(callback, state: FSMContext):
 
 @dp.callback_query(F.data == "review_edit_text")
 async def cb_review_edit_text(callback, state: FSMContext):
+    """Изменение текста отзыва — оценка сохраняется."""
     data = await state.get_data()
     rating = data.get("rating", 5)
     await state.set_state(OrderFlow.waiting_for_review_text)
-    # Сохраняем оценку и её message_id, текст отзыва будет перезаписан
     await state.update_data({"rating": rating})
     await callback.message.answer(REVIEW_WRITE_TEXT)
     await asyncio.sleep(1)
@@ -1185,10 +1208,10 @@ async def cb_review_edit_text(callback, state: FSMContext):
 
 @dp.callback_query(F.data == "review_change_rating")
 async def cb_review_change_rating(callback, state: FSMContext):
+    """Изменение оценки — текст отзыва сохраняется."""
     data = await state.get_data()
     review_text = data.get("review_text", "")
     await state.set_state(OrderFlow.waiting_for_rating)
-    # Сохраняем текст отзыва и его message_id, оценка будет перезаписана
     await state.update_data({"review_text": review_text})
     await callback.message.answer(REVIEW_RATING_TEXT)
     await asyncio.sleep(1)
@@ -1211,21 +1234,35 @@ async def cb_review_to_menu(callback, state: FSMContext):
     await callback.answer()
 
 
-# ── ИЗМЕНЕНО: пересылка только сообщения с оценкой ──
+# ── ИСПРАВЛЕНО: отправка только оценки через send_message ──
 @dp.callback_query(F.data == "review_send_stars_only")
 async def cb_review_send_stars_only(callback, state: FSMContext):
+    """Отправка только оценки (без текста отзыва) в группу."""
     data = await state.get_data()
+
+    logger.info(f"review_send_stars_only: данные из state = {data}")
+
     rating = data.get("rating", 5)
-    stars = "⭐" * rating
 
-    # Пересылаем исходное сообщение с оценкой
-    rating_msg_id = data.get("rating_message_id")
-    rating_chat_id = data.get("rating_chat_id")
-    if rating_msg_id and rating_chat_id:
-        await forward_review_to_group(rating_chat_id, rating_msg_id)
+    # Получаем username пользователя
+    user_name = ""
+    if callback.from_user.username:
+        user_name = f"@{callback.from_user.username}"
+    else:
+        user_name = f"id:{callback.from_user.id}"
 
-    await state.clear()
-    await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=_kb_menu)
+    # Отправляем только оценку через send_message
+    ok = await send_review_to_group(rating, "", user_name)
+
+    if not ok:
+        logger.error("review_send_stars_only: отправка оценки в группу неудачна")
+        await callback.message.answer(
+            "❌ Не удалось отправить отзыв. Попробуйте позже или напишите в поддержку."
+        )
+    else:
+        await state.clear()
+        await callback.message.answer("Спасибо за вашу оценку! 💙", reply_markup=_kb_menu)
+
     await asyncio.sleep(1)
     try:
         await callback.message.delete()
@@ -1261,10 +1298,14 @@ async def main():
     load_balance()
 
     asyncio.create_task(check_payments_loop())
-    await dp.start_polling(bot)
 
-    if http_session and not http_session.closed:
-        await http_session.close()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        global http_session
+        if http_session and not http_session.closed:
+            await http_session.close()
+            logger.info("HTTP-сессия закрыта")
 
 
 if __name__ == "__main__":
